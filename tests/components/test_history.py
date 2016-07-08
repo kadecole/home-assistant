@@ -1,15 +1,8 @@
-"""
-tests.test_component_history
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Tests the history component.
-"""
+"""The tests the History component."""
 # pylint: disable=protected-access,too-many-public-methods
-import time
-import os
-import unittest
-from unittest.mock import patch
 from datetime import timedelta
+import unittest
+from unittest.mock import patch, sentinel
 
 import homeassistant.core as ha
 import homeassistant.util.dt as dt_util
@@ -20,34 +13,39 @@ from tests.common import (
 
 
 class TestComponentHistory(unittest.TestCase):
-    """ Tests homeassistant.components.history module. """
+    """Test History component."""
 
     def setUp(self):  # pylint: disable=invalid-name
-        """ Init needed objects. """
+        """Setup things to be run when tests are started."""
         self.hass = get_test_home_assistant(1)
-        self.init_rec = False
 
     def tearDown(self):  # pylint: disable=invalid-name
-        """ Stop down stuff we started. """
+        """Stop everything that was started."""
         self.hass.stop()
 
-        if self.init_rec:
-            recorder._INSTANCE.block_till_done()
-            os.remove(self.hass.config.path(recorder.DB_FILE))
-
     def init_recorder(self):
-        recorder.setup(self.hass, {})
+        """Initialize the recorder."""
+        db_uri = 'sqlite://'
+        with patch('homeassistant.core.Config.path', return_value=db_uri):
+            recorder.setup(self.hass, config={
+                "recorder": {
+                    "db_url": db_uri}})
         self.hass.start()
+        recorder._INSTANCE.block_till_db_ready()
+        self.wait_recording_done()
+
+    def wait_recording_done(self):
+        """Block till recording is done."""
+        self.hass.pool.block_till_done()
         recorder._INSTANCE.block_till_done()
-        self.init_rec = True
 
     def test_setup(self):
-        """ Test setup method of history. """
+        """Test setup method of history."""
         mock_http_component(self.hass)
         self.assertTrue(history.setup(self.hass, {}))
 
     def test_last_5_states(self):
-        """ Test retrieving the last 5 states. """
+        """Test retrieving the last 5 states."""
         self.init_recorder()
         states = []
 
@@ -56,36 +54,22 @@ class TestComponentHistory(unittest.TestCase):
         for i in range(7):
             self.hass.states.set(entity_id, "State {}".format(i))
 
+            self.wait_recording_done()
+
             if i > 1:
                 states.append(self.hass.states.get(entity_id))
-
-            self.hass.pool.block_till_done()
-            recorder._INSTANCE.block_till_done()
 
         self.assertEqual(
             list(reversed(states)), history.last_5_states(entity_id))
 
     def test_get_states(self):
-        """ Test getting states at a specific point in time. """
+        """Test getting states at a specific point in time."""
         self.init_recorder()
         states = []
 
-        for i in range(5):
-            state = ha.State(
-                'test.point_in_time_{}'.format(i % 5),
-                "State {}".format(i),
-                {'attribute_test': i})
-
-            mock_state_change_event(self.hass, state)
-            self.hass.pool.block_till_done()
-
-            states.append(state)
-
-        recorder._INSTANCE.block_till_done()
-
-        point = dt_util.utcnow() + timedelta(seconds=1)
-
-        with patch('homeassistant.util.dt.utcnow', return_value=point):
+        now = dt_util.utcnow()
+        with patch('homeassistant.components.recorder.dt_util.utcnow',
+                   return_value=now):
             for i in range(5):
                 state = ha.State(
                     'test.point_in_time_{}'.format(i % 5),
@@ -93,36 +77,54 @@ class TestComponentHistory(unittest.TestCase):
                     {'attribute_test': i})
 
                 mock_state_change_event(self.hass, state)
-                self.hass.pool.block_till_done()
+
+                states.append(state)
+
+            self.wait_recording_done()
+
+        future = now + timedelta(seconds=1)
+        with patch('homeassistant.components.recorder.dt_util.utcnow',
+                   return_value=future):
+            for i in range(5):
+                state = ha.State(
+                    'test.point_in_time_{}'.format(i % 5),
+                    "State {}".format(i),
+                    {'attribute_test': i})
+
+                mock_state_change_event(self.hass, state)
+
+            self.wait_recording_done()
 
         # Get states returns everything before POINT
         self.assertEqual(states,
-                         sorted(history.get_states(point),
+                         sorted(history.get_states(future),
                                 key=lambda state: state.entity_id))
 
         # Test get_state here because we have a DB setup
         self.assertEqual(
-            states[0], history.get_state(point, states[0].entity_id))
+            states[0], history.get_state(future, states[0].entity_id))
 
     def test_state_changes_during_period(self):
+        """Test state change during period."""
         self.init_recorder()
         entity_id = 'media_player.test'
 
         def set_state(state):
             self.hass.states.set(entity_id, state)
-            self.hass.pool.block_till_done()
-            recorder._INSTANCE.block_till_done()
-
+            self.wait_recording_done()
             return self.hass.states.get(entity_id)
-
-        set_state('idle')
-        set_state('YouTube')
 
         start = dt_util.utcnow()
         point = start + timedelta(seconds=1)
         end = point + timedelta(seconds=1)
 
-        with patch('homeassistant.util.dt.utcnow', return_value=point):
+        with patch('homeassistant.components.recorder.dt_util.utcnow',
+                   return_value=start):
+            set_state('idle')
+            set_state('YouTube')
+
+        with patch('homeassistant.components.recorder.dt_util.utcnow',
+                   return_value=point):
             states = [
                 set_state('idle'),
                 set_state('Netflix'),
@@ -130,10 +132,74 @@ class TestComponentHistory(unittest.TestCase):
                 set_state('YouTube'),
             ]
 
-        with patch('homeassistant.util.dt.utcnow', return_value=end):
+        with patch('homeassistant.components.recorder.dt_util.utcnow',
+                   return_value=end):
             set_state('Netflix')
             set_state('Plex')
 
-        self.assertEqual(
-            {entity_id: states},
-            history.state_changes_during_period(start, end, entity_id))
+        hist = history.state_changes_during_period(start, end, entity_id)
+
+        self.assertEqual(states, hist[entity_id])
+
+    def test_get_significant_states(self):
+        """Test that only significant states are returned.
+
+        We inject a bunch of state updates from media player, zone and
+        thermostat. We should get back every thermostat change that
+        includes an attribute change, but only the state updates for
+        media player (attribute changes are not significant and not returned).
+        """
+        self.init_recorder()
+        mp = 'media_player.test'
+        therm = 'thermostat.test'
+        zone = 'zone.home'
+        script_nc = 'script.cannot_cancel_this_one'
+        script_c = 'script.can_cancel_this_one'
+
+        def set_state(entity_id, state, **kwargs):
+            self.hass.states.set(entity_id, state, **kwargs)
+            self.wait_recording_done()
+            return self.hass.states.get(entity_id)
+
+        zero = dt_util.utcnow()
+        one = zero + timedelta(seconds=1)
+        two = one + timedelta(seconds=1)
+        three = two + timedelta(seconds=1)
+        four = three + timedelta(seconds=1)
+
+        states = {therm: [], mp: [], script_c: []}
+        with patch('homeassistant.components.recorder.dt_util.utcnow',
+                   return_value=one):
+            states[mp].append(
+                set_state(mp, 'idle',
+                          attributes={'media_title': str(sentinel.mt1)}))
+            states[mp].append(
+                set_state(mp, 'YouTube',
+                          attributes={'media_title': str(sentinel.mt2)}))
+            states[therm].append(
+                set_state(therm, 20, attributes={'current_temperature': 19.5}))
+
+        with patch('homeassistant.components.recorder.dt_util.utcnow',
+                   return_value=two):
+            # This state will be skipped only different in time
+            set_state(mp, 'YouTube',
+                      attributes={'media_title': str(sentinel.mt3)})
+            # This state will be skipped because domain blacklisted
+            set_state(zone, 'zoning')
+            set_state(script_nc, 'off')
+            states[script_c].append(
+                set_state(script_c, 'off', attributes={'can_cancel': True}))
+            states[therm].append(
+                set_state(therm, 21, attributes={'current_temperature': 19.8}))
+
+        with patch('homeassistant.components.recorder.dt_util.utcnow',
+                   return_value=three):
+            states[mp].append(
+                set_state(mp, 'Netflix',
+                          attributes={'media_title': str(sentinel.mt4)}))
+            # Attributes changed even though state is the same
+            states[therm].append(
+                set_state(therm, 21, attributes={'current_temperature': 20}))
+
+        hist = history.get_significant_states(zero, four)
+        assert states == hist

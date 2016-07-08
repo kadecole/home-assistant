@@ -1,7 +1,5 @@
 """
-homeassistant.components.sensor.systemmonitor
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Shows system monitor values such as: disk, memory, and processor use.
+Support for monitoring the local system.
 
 For more details about this platform, please refer to the documentation at
 https://home-assistant.io/components/sensor.systemmonitor/
@@ -9,30 +7,30 @@ https://home-assistant.io/components/sensor.systemmonitor/
 import logging
 
 import homeassistant.util.dt as dt_util
+from homeassistant.const import STATE_OFF, STATE_ON
 from homeassistant.helpers.entity import Entity
-from homeassistant.const import STATE_ON, STATE_OFF
 
-REQUIREMENTS = ['psutil==3.2.2']
+REQUIREMENTS = ['psutil==4.3.0']
 SENSOR_TYPES = {
-    'disk_use_percent': ['Disk Use', '%'],
-    'disk_use': ['Disk Use', 'GiB'],
-    'disk_free': ['Disk Free', 'GiB'],
-    'memory_use_percent': ['RAM Use', '%'],
-    'memory_use': ['RAM Use', 'MiB'],
-    'memory_free': ['RAM Free', 'MiB'],
-    'processor_use': ['CPU Use', '%'],
-    'process': ['Process', ''],
-    'swap_use_percent': ['Swap Use', '%'],
-    'swap_use': ['Swap Use', 'GiB'],
-    'swap_free': ['Swap Free', 'GiB'],
-    'network_out': ['Sent', 'MiB'],
-    'network_in': ['Recieved', 'MiB'],
-    'packets_out': ['Packets sent', ''],
-    'packets_in': ['Packets recieved', ''],
-    'ipv4_address': ['IPv4 address', ''],
-    'ipv6_address': ['IPv6 address', ''],
-    'last_boot': ['Last Boot', ''],
-    'since_last_boot': ['Since Last Boot', '']
+    'disk_use_percent': ['Disk Use', '%', 'mdi:harddisk'],
+    'disk_use': ['Disk Use', 'GiB', 'mdi:harddisk'],
+    'disk_free': ['Disk Free', 'GiB', 'mdi:harddisk'],
+    'memory_use_percent': ['RAM Use', '%', 'mdi:memory'],
+    'memory_use': ['RAM Use', 'MiB', 'mdi:memory'],
+    'memory_free': ['RAM Free', 'MiB', 'mdi:memory'],
+    'processor_use': ['CPU Use', '%', 'mdi:memory'],
+    'process': ['Process', '', 'mdi:memory'],
+    'swap_use_percent': ['Swap Use', '%', 'mdi:harddisk'],
+    'swap_use': ['Swap Use', 'GiB', 'mdi:harddisk'],
+    'swap_free': ['Swap Free', 'GiB', 'mdi:harddisk'],
+    'network_out': ['Sent', 'MiB', 'mdi:server-network'],
+    'network_in': ['Received', 'MiB', 'mdi:server-network'],
+    'packets_out': ['Packets sent', '', 'mdi:server-network'],
+    'packets_in': ['Packets received', '', 'mdi:server-network'],
+    'ipv4_address': ['IPv4 address', '', 'mdi:server-network'],
+    'ipv6_address': ['IPv6 address', '', 'mdi:server-network'],
+    'last_boot': ['Last Boot', '', 'mdi:clock'],
+    'since_last_boot': ['Since Last Boot', '', 'mdi:clock']
 }
 
 _LOGGER = logging.getLogger(__name__)
@@ -40,8 +38,7 @@ _LOGGER = logging.getLogger(__name__)
 
 # pylint: disable=unused-argument
 def setup_platform(hass, config, add_devices, discovery_info=None):
-    """ Sets up the sensors. """
-
+    """Setup the System sensors."""
     dev = []
     for resource in config['resources']:
         if 'arg' not in resource:
@@ -55,9 +52,10 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
 
 
 class SystemMonitorSensor(Entity):
-    """ A system monitor sensor. """
+    """Implementation of a system monitor sensor."""
 
     def __init__(self, sensor_type, argument=''):
+        """Initialize the sensor."""
         self._name = SENSOR_TYPES[sensor_type][0] + ' ' + argument
         self.argument = argument
         self.type = sensor_type
@@ -67,19 +65,27 @@ class SystemMonitorSensor(Entity):
 
     @property
     def name(self):
+        """Return the name of the sensor."""
         return self._name.rstrip()
 
     @property
+    def icon(self):
+        """Icon to use in the frontend, if any."""
+        return SENSOR_TYPES[self.type][2]
+
+    @property
     def state(self):
-        """ Returns the state of the device. """
+        """Return the state of the device."""
         return self._state
 
     @property
     def unit_of_measurement(self):
+        """Return the unit of measurement of this entity, if any."""
         return self._unit_of_measurement
 
     # pylint: disable=too-many-branches
     def update(self):
+        """Get the latest system information."""
         import psutil
         if self.type == 'disk_use_percent':
             self._state = psutil.disk_usage(self.argument).percent
@@ -125,9 +131,9 @@ class SystemMonitorSensor(Entity):
         elif self.type == 'ipv6_address':
             self._state = psutil.net_if_addrs()[self.argument][1][1]
         elif self.type == 'last_boot':
-            self._state = dt_util.datetime_to_date_str(
-                dt_util.as_local(
-                    dt_util.utc_from_timestamp(psutil.boot_time())))
+            self._state = dt_util.as_local(
+                dt_util.utc_from_timestamp(psutil.boot_time())
+            ).date().isoformat()
         elif self.type == 'since_last_boot':
             self._state = dt_util.utcnow() - dt_util.utc_from_timestamp(
                 psutil.boot_time())

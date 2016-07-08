@@ -1,46 +1,44 @@
-"""
-tests.test_component_alexa
-~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Tests Home Assistant Alexa component does what it should do.
-"""
+"""The tests for the Alexa component."""
 # pylint: disable=protected-access,too-many-public-methods
-import unittest
 import json
-from unittest.mock import patch
+import time
+import unittest
 
 import requests
 
 from homeassistant import bootstrap, const
-import homeassistant.core as ha
 from homeassistant.components import alexa, http
 
+from tests.common import get_test_instance_port, get_test_home_assistant
+
 API_PASSWORD = "test1234"
-
-# Somehow the socket that holds the default port does not get released
-# when we close down HA in a different test case. Until I have figured
-# out what is going on, let's run this test on a different port.
-SERVER_PORT = 8119
-
+SERVER_PORT = get_test_instance_port()
 API_URL = "http://127.0.0.1:{}{}".format(SERVER_PORT, alexa.API_ENDPOINT)
+HA_HEADERS = {
+    const.HTTP_HEADER_HA_AUTH: API_PASSWORD,
+    const.HTTP_HEADER_CONTENT_TYPE: const.CONTENT_TYPE_JSON,
+}
 
-HA_HEADERS = {const.HTTP_HEADER_HA_AUTH: API_PASSWORD}
+SESSION_ID = 'amzn1.echo-api.session.0000000-0000-0000-0000-00000000000'
+APPLICATION_ID = 'amzn1.echo-sdk-ams.app.000000-d0ed-0000-ad00-000000d00ebe'
+REQUEST_ID = 'amzn1.echo-api.request.0000000-0000-0000-0000-00000000000'
 
 hass = None
+calls = []
 
 
-@patch('homeassistant.components.http.util.get_local_ip',
-       return_value='127.0.0.1')
-def setUpModule(mock_get_local_ip):   # pylint: disable=invalid-name
-    """ Initalizes a Home Assistant server. """
+def setUpModule():   # pylint: disable=invalid-name
+    """Initialize a Home Assistant server for testing this module."""
     global hass
 
-    hass = ha.HomeAssistant()
+    hass = get_test_home_assistant()
 
     bootstrap.setup_component(
         hass, http.DOMAIN,
         {http.DOMAIN: {http.CONF_API_PASSWORD: API_PASSWORD,
          http.CONF_SERVER_PORT: SERVER_PORT}})
+
+    hass.services.register('test', 'alexa', lambda call: calls.append(call))
 
     bootstrap.setup_component(hass, alexa.DOMAIN, {
         'alexa': {
@@ -50,10 +48,16 @@ def setUpModule(mock_get_local_ip):   # pylint: disable=invalid-name
                         'type': 'plaintext',
                         'text':
                         """
-                            {%- if is_state('device_tracker.paulus', 'home') and is_state('device_tracker.anne_therese', 'home') -%}
+                            {%- if is_state('device_tracker.paulus', 'home')
+                                   and is_state('device_tracker.anne_therese',
+                                                'home') -%}
                                 You are both home, you silly
                             {%- else -%}
-                                Anne Therese is at {{ states("device_tracker.anne_therese") }} and Paulus is at {{ states("device_tracker.paulus") }}
+                                Anne Therese is at {{
+                                    states("device_tracker.anne_therese")
+                                }} and Paulus is at {{
+                                    states("device_tracker.paulus")
+                                }}
                             {% endif %}
                         """,
                     }
@@ -61,7 +65,20 @@ def setUpModule(mock_get_local_ip):   # pylint: disable=invalid-name
                 'GetZodiacHoroscopeIntent': {
                     'speech': {
                         'type': 'plaintext',
-                        'text': 'You told us your sign is {{ ZodiacSign }}.'
+                        'text': 'You told us your sign is {{ ZodiacSign }}.',
+                    }
+                },
+                'CallServiceIntent': {
+                    'speech': {
+                        'type': 'plaintext',
+                        'text': 'Service called',
+                    },
+                    'action': {
+                        'service': 'test.alexa',
+                        'data_template': {
+                            'hello': '{{ ZodiacSign }}'
+                        },
+                        'entity_id': 'switch.test',
                     }
                 }
             }
@@ -69,10 +86,11 @@ def setUpModule(mock_get_local_ip):   # pylint: disable=invalid-name
     })
 
     hass.start()
+    time.sleep(0.05)
 
 
 def tearDownModule():   # pylint: disable=invalid-name
-    """ Stops the Home Assistant server. """
+    """Stop the Home Assistant server."""
     hass.stop()
 
 
@@ -82,16 +100,21 @@ def _req(data={}):
 
 
 class TestAlexa(unittest.TestCase):
-    """ Test Alexa. """
+    """Test Alexa."""
+
+    def tearDown(self):
+        """Stop everything that was started."""
+        hass.pool.block_till_done()
 
     def test_launch_request(self):
+        """Test the launch of a request."""
         data = {
             'version': '1.0',
             'session': {
                 'new': True,
-                'sessionId': 'amzn1.echo-api.session.0000000-0000-0000-0000-00000000000',
+                'sessionId': SESSION_ID,
                 'application': {
-                    'applicationId': 'amzn1.echo-sdk-ams.app.000000-d0ed-0000-ad00-000000d00ebe'
+                    'applicationId': APPLICATION_ID
                 },
                 'attributes': {},
                 'user': {
@@ -100,7 +123,7 @@ class TestAlexa(unittest.TestCase):
             },
             'request': {
                 'type': 'LaunchRequest',
-                'requestId': 'amzn1.echo-api.request.0000000-0000-0000-0000-00000000000',
+                'requestId': REQUEST_ID,
                 'timestamp': '2015-05-13T12:34:56Z'
             }
         }
@@ -110,13 +133,14 @@ class TestAlexa(unittest.TestCase):
         self.assertIn('outputSpeech', resp['response'])
 
     def test_intent_request_with_slots(self):
+        """Test a request with slots."""
         data = {
             'version': '1.0',
             'session': {
                 'new': False,
-                'sessionId': 'amzn1.echo-api.session.0000000-0000-0000-0000-00000000000',
+                'sessionId': SESSION_ID,
                 'application': {
-                    'applicationId': 'amzn1.echo-sdk-ams.app.000000-d0ed-0000-ad00-000000d00ebe'
+                    'applicationId': APPLICATION_ID
                 },
                 'attributes': {
                     'supportedHoroscopePeriods': {
@@ -131,7 +155,7 @@ class TestAlexa(unittest.TestCase):
             },
             'request': {
                 'type': 'IntentRequest',
-                'requestId': ' amzn1.echo-api.request.0000000-0000-0000-0000-00000000000',
+                'requestId': REQUEST_ID,
                 'timestamp': '2015-05-13T12:34:56Z',
                 'intent': {
                     'name': 'GetZodiacHoroscopeIntent',
@@ -146,17 +170,19 @@ class TestAlexa(unittest.TestCase):
         }
         req = _req(data)
         self.assertEqual(200, req.status_code)
-        text = req.json().get('response', {}).get('outputSpeech', {}).get('text')
+        text = req.json().get('response', {}).get('outputSpeech',
+                                                  {}).get('text')
         self.assertEqual('You told us your sign is virgo.', text)
 
-    def test_intent_request_without_slots(self):
+    def test_intent_request_with_slots_but_no_value(self):
+        """Test a request with slots but no value."""
         data = {
             'version': '1.0',
             'session': {
                 'new': False,
-                'sessionId': 'amzn1.echo-api.session.0000000-0000-0000-0000-00000000000',
+                'sessionId': SESSION_ID,
                 'application': {
-                    'applicationId': 'amzn1.echo-sdk-ams.app.000000-d0ed-0000-ad00-000000d00ebe'
+                    'applicationId': APPLICATION_ID
                 },
                 'attributes': {
                     'supportedHoroscopePeriods': {
@@ -171,7 +197,48 @@ class TestAlexa(unittest.TestCase):
             },
             'request': {
                 'type': 'IntentRequest',
-                'requestId': ' amzn1.echo-api.request.0000000-0000-0000-0000-00000000000',
+                'requestId': REQUEST_ID,
+                'timestamp': '2015-05-13T12:34:56Z',
+                'intent': {
+                    'name': 'GetZodiacHoroscopeIntent',
+                    'slots': {
+                        'ZodiacSign': {
+                            'name': 'ZodiacSign',
+                        }
+                    }
+                }
+            }
+        }
+        req = _req(data)
+        self.assertEqual(200, req.status_code)
+        text = req.json().get('response', {}).get('outputSpeech',
+                                                  {}).get('text')
+        self.assertEqual('You told us your sign is .', text)
+
+    def test_intent_request_without_slots(self):
+        """Test a request without slots."""
+        data = {
+            'version': '1.0',
+            'session': {
+                'new': False,
+                'sessionId': SESSION_ID,
+                'application': {
+                    'applicationId': APPLICATION_ID
+                },
+                'attributes': {
+                    'supportedHoroscopePeriods': {
+                        'daily': True,
+                        'weekly': False,
+                        'monthly': False
+                    }
+                },
+                'user': {
+                    'userId': 'amzn1.account.AM3B00000000000000000000000'
+                }
+            },
+            'request': {
+                'type': 'IntentRequest',
+                'requestId': REQUEST_ID,
                 'timestamp': '2015-05-13T12:34:56Z',
                 'intent': {
                     'name': 'WhereAreWeIntent',
@@ -180,26 +247,70 @@ class TestAlexa(unittest.TestCase):
         }
         req = _req(data)
         self.assertEqual(200, req.status_code)
-        text = req.json().get('response', {}).get('outputSpeech', {}).get('text')
+        text = req.json().get('response', {}).get('outputSpeech',
+                                                  {}).get('text')
 
-        self.assertEqual('Anne Therese is at unknown and Paulus is at unknown', text)
+        self.assertEqual('Anne Therese is at unknown and Paulus is at unknown',
+                         text)
 
         hass.states.set('device_tracker.paulus', 'home')
         hass.states.set('device_tracker.anne_therese', 'home')
 
         req = _req(data)
         self.assertEqual(200, req.status_code)
-        text = req.json().get('response', {}).get('outputSpeech', {}).get('text')
+        text = req.json().get('response', {}).get('outputSpeech',
+                                                  {}).get('text')
         self.assertEqual('You are both home, you silly', text)
 
-    def test_session_ended_request(self):
+    def test_intent_request_calling_service(self):
+        """Test a request for calling a service."""
         data = {
             'version': '1.0',
             'session': {
                 'new': False,
-                'sessionId': 'amzn1.echo-api.session.0000000-0000-0000-0000-00000000000',
+                'sessionId': SESSION_ID,
                 'application': {
-                    'applicationId': 'amzn1.echo-sdk-ams.app.000000-d0ed-0000-ad00-000000d00ebe'
+                    'applicationId': APPLICATION_ID
+                },
+                'attributes': {},
+                'user': {
+                    'userId': 'amzn1.account.AM3B00000000000000000000000'
+                }
+            },
+            'request': {
+                'type': 'IntentRequest',
+                'requestId': REQUEST_ID,
+                'timestamp': '2015-05-13T12:34:56Z',
+                'intent': {
+                    'name': 'CallServiceIntent',
+                    'slots': {
+                        'ZodiacSign': {
+                            'name': 'ZodiacSign',
+                            'value': 'virgo',
+                        }
+                    }
+                }
+            }
+        }
+        call_count = len(calls)
+        req = _req(data)
+        self.assertEqual(200, req.status_code)
+        self.assertEqual(call_count + 1, len(calls))
+        call = calls[-1]
+        self.assertEqual('test', call.domain)
+        self.assertEqual('alexa', call.service)
+        self.assertEqual(['switch.test'], call.data.get('entity_id'))
+        self.assertEqual('virgo', call.data.get('hello'))
+
+    def test_session_ended_request(self):
+        """Test the request for ending the session."""
+        data = {
+            'version': '1.0',
+            'session': {
+                'new': False,
+                'sessionId': SESSION_ID,
+                'application': {
+                    'applicationId': APPLICATION_ID
                 },
                 'attributes': {
                     'supportedHoroscopePeriods': {
@@ -214,7 +325,7 @@ class TestAlexa(unittest.TestCase):
             },
             'request': {
                 'type': 'SessionEndedRequest',
-                'requestId': 'amzn1.echo-api.request.0000000-0000-0000-0000-00000000000',
+                'requestId': REQUEST_ID,
                 'timestamp': '2015-05-13T12:34:56Z',
                 'reason': 'USER_INITIATED'
             }

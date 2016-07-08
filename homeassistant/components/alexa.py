@@ -1,7 +1,5 @@
 """
-components.alexa
-~~~~~~~~~~~~~~~~
-Component to offer a service end point for an Alexa skill.
+Support for Alexa skill service end point.
 
 For more details about this component, please refer to the documentation at
 https://home-assistant.io/components/alexa/
@@ -9,105 +7,128 @@ https://home-assistant.io/components/alexa/
 import enum
 import logging
 
-from homeassistant.const import HTTP_OK, HTTP_UNPROCESSABLE_ENTITY
-from homeassistant.util import template
+from homeassistant.const import HTTP_BAD_REQUEST
+from homeassistant.helpers import template, script
+from homeassistant.components.http import HomeAssistantView
 
 DOMAIN = 'alexa'
 DEPENDENCIES = ['http']
 
 _LOGGER = logging.getLogger(__name__)
-_CONFIG = {}
 
 API_ENDPOINT = '/api/alexa'
 
 CONF_INTENTS = 'intents'
 CONF_CARD = 'card'
 CONF_SPEECH = 'speech'
+CONF_ACTION = 'action'
 
 
 def setup(hass, config):
-    """ Activate Alexa component. """
-    _CONFIG.update(config[DOMAIN].get(CONF_INTENTS, {}))
-
-    hass.http.register_path('POST', API_ENDPOINT, _handle_alexa, True)
+    """Activate Alexa component."""
+    hass.wsgi.register_view(AlexaView(hass,
+                                      config[DOMAIN].get(CONF_INTENTS, {})))
 
     return True
 
 
-def _handle_alexa(handler, path_match, data):
-    """ Handle Alexa. """
-    _LOGGER.debug('Received Alexa request: %s', data)
+class AlexaView(HomeAssistantView):
+    """Handle Alexa requests."""
 
-    req = data.get('request')
+    url = API_ENDPOINT
+    name = 'api:alexa'
 
-    if req is None:
-        _LOGGER.error('Received invalid data from Alexa: %s', data)
-        handler.write_json_message(
-            "Invalid value received for port", HTTP_UNPROCESSABLE_ENTITY)
-        return
+    def __init__(self, hass, intents):
+        """Initialize Alexa view."""
+        super().__init__(hass)
 
-    req_type = req['type']
+        for name, intent in intents.items():
+            if CONF_ACTION in intent:
+                intent[CONF_ACTION] = script.Script(
+                    hass, intent[CONF_ACTION], "Alexa intent {}".format(name))
 
-    if req_type == 'SessionEndedRequest':
-        handler.send_response(HTTP_OK)
-        handler.end_headers()
-        return
+        self.intents = intents
 
-    intent = req.get('intent')
-    response = AlexaResponse(handler.server.hass, intent)
+    def post(self, request):
+        """Handle Alexa."""
+        data = request.json
 
-    if req_type == 'LaunchRequest':
-        response.add_speech(
-            SpeechType.plaintext,
-            "Hello, and welcome to the future. How may I help?")
-        handler.write_json(response.as_dict())
-        return
+        _LOGGER.debug('Received Alexa request: %s', data)
 
-    if req_type != 'IntentRequest':
-        _LOGGER.warning('Received unsupported request: %s', req_type)
-        return
+        req = data.get('request')
 
-    intent_name = intent['name']
-    config = _CONFIG.get(intent_name)
+        if req is None:
+            _LOGGER.error('Received invalid data from Alexa: %s', data)
+            return self.json_message('Expected request value not received',
+                                     HTTP_BAD_REQUEST)
 
-    if config is None:
-        _LOGGER.warning('Received unknown intent %s', intent_name)
-        response.add_speech(
-            SpeechType.plaintext,
-            "This intent is not yet configured within Home Assistant.")
-        handler.write_json(response.as_dict())
-        return
+        req_type = req['type']
 
-    speech = config.get(CONF_SPEECH)
-    card = config.get(CONF_CARD)
+        if req_type == 'SessionEndedRequest':
+            return None
 
-    # pylint: disable=unsubscriptable-object
-    if speech is not None:
-        response.add_speech(SpeechType[speech['type']], speech['text'])
+        intent = req.get('intent')
+        response = AlexaResponse(self.hass, intent)
 
-    if card is not None:
-        response.add_card(CardType[card['type']], card['title'],
-                          card['content'])
+        if req_type == 'LaunchRequest':
+            response.add_speech(
+                SpeechType.plaintext,
+                "Hello, and welcome to the future. How may I help?")
+            return self.json(response)
 
-    handler.write_json(response.as_dict())
+        if req_type != 'IntentRequest':
+            _LOGGER.warning('Received unsupported request: %s', req_type)
+            return self.json_message(
+                'Received unsupported request: {}'.format(req_type),
+                HTTP_BAD_REQUEST)
+
+        intent_name = intent['name']
+        config = self.intents.get(intent_name)
+
+        if config is None:
+            _LOGGER.warning('Received unknown intent %s', intent_name)
+            response.add_speech(
+                SpeechType.plaintext,
+                "This intent is not yet configured within Home Assistant.")
+            return self.json(response)
+
+        speech = config.get(CONF_SPEECH)
+        card = config.get(CONF_CARD)
+        action = config.get(CONF_ACTION)
+
+        if action is not None:
+            action.run(response.variables)
+
+        # pylint: disable=unsubscriptable-object
+        if speech is not None:
+            response.add_speech(SpeechType[speech['type']], speech['text'])
+
+        if card is not None:
+            response.add_card(CardType[card['type']], card['title'],
+                              card['content'])
+
+        return self.json(response)
 
 
 class SpeechType(enum.Enum):
-    """ Alexa speech types. """
+    """The Alexa speech types."""
+
     plaintext = "PlainText"
     ssml = "SSML"
 
 
 class CardType(enum.Enum):
-    """ Alexa card types. """
+    """The Alexa card types."""
+
     simple = "Simple"
     link_account = "LinkAccount"
 
 
 class AlexaResponse(object):
-    """ Helps generating the response for Alexa. """
+    """Help generating the response for Alexa."""
 
     def __init__(self, hass, intent=None):
+        """Initialize the response."""
         self.hass = hass
         self.speech = None
         self.card = None
@@ -116,12 +137,12 @@ class AlexaResponse(object):
         self.should_end_session = True
         if intent is not None and 'slots' in intent:
             self.variables = {key: value['value'] for key, value
-                              in intent['slots'].items()}
+                              in intent['slots'].items() if 'value' in value}
         else:
             self.variables = {}
 
     def add_card(self, card_type, title, content):
-        """ Add a card to the response. """
+        """Add a card to the response."""
         assert self.card is None
 
         card = {
@@ -137,7 +158,7 @@ class AlexaResponse(object):
         self.card = card
 
     def add_speech(self, speech_type, text):
-        """ Add speech to the response. """
+        """Add speech to the response."""
         assert self.speech is None
 
         key = 'ssml' if speech_type == SpeechType.ssml else 'text'
@@ -148,7 +169,7 @@ class AlexaResponse(object):
         }
 
     def add_reprompt(self, speech_type, text):
-        """ Add repromopt if user does not answer. """
+        """Add reprompt if user does not answer."""
         assert self.reprompt is None
 
         key = 'ssml' if speech_type == SpeechType.ssml else 'text'
@@ -159,7 +180,7 @@ class AlexaResponse(object):
         }
 
     def as_dict(self):
-        """ Returns response in an Alexa valid dict. """
+        """Return response in an Alexa valid dict."""
         response = {
             'shouldEndSession': self.should_end_session
         }
@@ -182,5 +203,5 @@ class AlexaResponse(object):
         }
 
     def _render(self, template_string):
-        """ Render a response, adding data from intent if available. """
+        """Render a response, adding data from intent if available."""
         return template.render(self.hass, template_string, self.variables)

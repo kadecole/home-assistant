@@ -1,34 +1,36 @@
 """
-homeassistant.components.logbook
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Parses events and generates a human log.
+Event parser and human readable log generator.
 
 For more details about this component, please refer to the documentation at
 https://home-assistant.io/components/logbook/
 """
+import logging
+import re
 from datetime import timedelta
 from itertools import groupby
-import re
 
-from homeassistant.core import State, DOMAIN as HA_DOMAIN
-from homeassistant.const import (
-    EVENT_STATE_CHANGED, STATE_NOT_HOME, STATE_ON, STATE_OFF,
-    EVENT_HOMEASSISTANT_START, EVENT_HOMEASSISTANT_STOP, HTTP_BAD_REQUEST)
-from homeassistant import util
+import voluptuous as vol
+
+import homeassistant.helpers.config_validation as cv
 import homeassistant.util.dt as dt_util
 from homeassistant.components import recorder, sun
-
+from homeassistant.components.http import HomeAssistantView
+from homeassistant.const import (EVENT_HOMEASSISTANT_START,
+                                 EVENT_HOMEASSISTANT_STOP, EVENT_STATE_CHANGED,
+                                 STATE_NOT_HOME, STATE_OFF, STATE_ON)
+from homeassistant.core import DOMAIN as HA_DOMAIN
+from homeassistant.core import State
+from homeassistant.helpers import template
+from homeassistant.helpers.entity import split_entity_id
 
 DOMAIN = "logbook"
 DEPENDENCIES = ['recorder', 'http']
 
 URL_LOGBOOK = re.compile(r'/api/logbook(?:/(?P<date>\d{4}-\d{1,2}-\d{1,2})|)')
 
-QUERY_EVENTS_BETWEEN = """
-    SELECT * FROM events WHERE time_fired > ? AND time_fired < ?
-"""
+_LOGGER = logging.getLogger(__name__)
 
-EVENT_LOGBOOK_ENTRY = 'LOGBOOK_ENTRY'
+EVENT_LOGBOOK_ENTRY = 'logbook_entry'
 
 GROUP_BY_MINUTES = 15
 
@@ -37,9 +39,16 @@ ATTR_MESSAGE = 'message'
 ATTR_DOMAIN = 'domain'
 ATTR_ENTITY_ID = 'entity_id'
 
+LOG_MESSAGE_SCHEMA = vol.Schema({
+    vol.Required(ATTR_NAME): cv.string,
+    vol.Required(ATTR_MESSAGE): cv.string,
+    vol.Optional(ATTR_DOMAIN): cv.slug,
+    vol.Optional(ATTR_ENTITY_ID): cv.entity_id,
+})
+
 
 def log_entry(hass, name, message, domain=None, entity_id=None):
-    """ Adds an entry to the logbook. """
+    """Add an entry to the logbook."""
     data = {
         ATTR_NAME: name,
         ATTR_MESSAGE: message
@@ -53,43 +62,56 @@ def log_entry(hass, name, message, domain=None, entity_id=None):
 
 
 def setup(hass, config):
-    """ Listens for download events to download files. """
-    hass.http.register_path('GET', URL_LOGBOOK, _handle_get_logbook)
+    """Listen for download events to download files."""
+    def log_message(service):
+        """Handle sending notification message service calls."""
+        message = service.data[ATTR_MESSAGE]
+        name = service.data[ATTR_NAME]
+        domain = service.data.get(ATTR_DOMAIN)
+        entity_id = service.data.get(ATTR_ENTITY_ID)
 
+        message = template.render(hass, message)
+        log_entry(hass, name, message, domain, entity_id)
+
+    hass.wsgi.register_view(LogbookView)
+
+    hass.services.register(DOMAIN, 'log', log_message,
+                           schema=LOG_MESSAGE_SCHEMA)
     return True
 
 
-def _handle_get_logbook(handler, path_match, data):
-    """ Return logbook entries. """
-    date_str = path_match.group('date')
+class LogbookView(HomeAssistantView):
+    """Handle logbook view requests."""
 
-    if date_str:
-        start_date = dt_util.date_str_to_date(date_str)
+    url = '/api/logbook'
+    name = 'api:logbook'
+    extra_urls = ['/api/logbook/<date:date>']
 
-        if start_date is None:
-            handler.write_json_message("Error parsing JSON", HTTP_BAD_REQUEST)
-            return
+    def get(self, request, date=None):
+        """Retrieve logbook entries."""
+        if date:
+            start_day = dt_util.start_of_local_day(date)
+        else:
+            start_day = dt_util.start_of_local_day()
 
-        start_day = dt_util.start_of_local_day(start_date)
-    else:
-        start_day = dt_util.start_of_local_day()
+        end_day = start_day + timedelta(days=1)
 
-    end_day = start_day + timedelta(days=1)
+        events = recorder.get_model('Events')
+        query = recorder.query('Events').filter(
+            (events.time_fired > start_day) &
+            (events.time_fired < end_day))
+        events = recorder.execute(query)
 
-    events = recorder.query_events(
-        QUERY_EVENTS_BETWEEN,
-        (dt_util.as_utc(start_day), dt_util.as_utc(end_day)))
-
-    handler.write_json(humanify(events))
+        return self.json(humanify(events))
 
 
 class Entry(object):
-    """ A human readable version of the log. """
+    """A human readable version of the log."""
 
     # pylint: disable=too-many-arguments, too-few-public-methods
-
     def __init__(self, when=None, name=None, message=None, domain=None,
                  entity_id=None):
+        """Initialize the entry."""
         self.when = when
         self.name = name
         self.message = message
@@ -97,9 +119,9 @@ class Entry(object):
         self.entity_id = entity_id
 
     def as_dict(self):
-        """ Convert Entry to a dict to be used within JSON. """
+        """Convert entry to a dict to be used within JSON."""
         return {
-            'when': dt_util.datetime_to_str(self.when),
+            'when': self.when,
             'name': self.name,
             'message': self.message,
             'domain': self.domain,
@@ -108,15 +130,13 @@ class Entry(object):
 
 
 def humanify(events):
-    """
-    Generator that converts a list of events into Entry objects.
+    """Generator that converts a list of events into Entry objects.
 
     Will try to group events if possible:
      - if 2+ sensor updates in GROUP_BY_MINUTES, show last
      - if home assistant stop and start happen in same minute call it restarted
     """
     # pylint: disable=too-many-branches
-
     # Group events in batches of GROUP_BY_MINUTES
     for _, g_events in groupby(
             events,
@@ -127,7 +147,7 @@ def humanify(events):
         # Keep track of last sensor states
         last_sensor_event = {}
 
-        # group HA start/stop events
+        # Group HA start/stop events
         # Maps minute of event to 1: stop, 2: stop + start
         start_stop_events = {}
 
@@ -164,7 +184,7 @@ def humanify(events):
 
                 to_state = State.from_dict(event.data.get('new_state'))
 
-                # if last_changed != last_updated only attributes have changed
+                # If last_changed != last_updated only attributes have changed
                 # we do not report on that yet. Also filter auto groups.
                 if not to_state or \
                    to_state.last_changed != to_state.last_updated or \
@@ -204,12 +224,12 @@ def humanify(events):
                     event.time_fired, "Home Assistant", action,
                     domain=HA_DOMAIN)
 
-            elif event.event_type == EVENT_LOGBOOK_ENTRY:
+            elif event.event_type.lower() == EVENT_LOGBOOK_ENTRY:
                 domain = event.data.get(ATTR_DOMAIN)
                 entity_id = event.data.get(ATTR_ENTITY_ID)
                 if domain is None and entity_id is not None:
                     try:
-                        domain = util.split_entity_id(str(entity_id))[0]
+                        domain = split_entity_id(str(entity_id))[0]
                     except IndexError:
                         pass
 
@@ -220,10 +240,9 @@ def humanify(events):
 
 
 def _entry_message_from_state(domain, state):
-    """ Convert a state to a message for the logbook. """
+    """Convert a state to a message for the logbook."""
     # We pass domain in so we don't have to split entity_id again
     # pylint: disable=too-many-return-statements
-
     if domain == 'device_tracker':
         if state.state == STATE_NOT_HOME:
             return 'is away'

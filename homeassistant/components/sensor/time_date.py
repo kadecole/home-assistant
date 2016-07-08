@@ -1,13 +1,12 @@
 """
-homeassistant.components.sensor.time_date
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Date and Time service.
+Support for showing the date and the time.
 
 For more details about this platform, please refer to the documentation at
 https://home-assistant.io/components/sensor.time_date/
 """
 import logging
 
+from datetime import timedelta
 import homeassistant.util.dt as dt_util
 from homeassistant.helpers.entity import Entity
 
@@ -17,14 +16,15 @@ OPTION_TYPES = {
     'date': 'Date',
     'date_time': 'Date & Time',
     'time_date': 'Time & Date',
-    'beat': 'Time (beat)',
+    'beat': 'Internet Time',
     'time_utc': 'Time (UTC)',
 }
 
+TIME_STR_FORMAT = "%H:%M"
+
 
 def setup_platform(hass, config, add_devices, discovery_info=None):
-    """ Get the Time and Date sensor. """
-
+    """Setup the Time and Date sensor."""
     if hass.config.time_zone is None:
         _LOGGER.error("Timezone is not set in Home Assistant config")
         return False
@@ -41,9 +41,10 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
 
 # pylint: disable=too-few-public-methods
 class TimeDateSensor(Entity):
-    """ Implements a Time and Date sensor. """
+    """Implementation of a Time and Date sensor."""
 
     def __init__(self, option_type):
+        """Initialize the sensor."""
         self._name = OPTION_TYPES[option_type]
         self.type = option_type
         self._state = None
@@ -51,26 +52,38 @@ class TimeDateSensor(Entity):
 
     @property
     def name(self):
-        """ Returns the name of the device. """
+        """Return the name of the sensor."""
         return self._name
 
     @property
     def state(self):
-        """ Returns the state of the device. """
+        """Return the state of the sensor."""
         return self._state
 
+    @property
+    def icon(self):
+        """Icon to use in the frontend, if any."""
+        if "date" in self.type and "time" in self.type:
+            return "mdi:calendar-clock"
+        elif "date" in self.type:
+            return "mdi:calendar"
+        else:
+            return "mdi:clock"
+
     def update(self):
-        """ Gets the latest data and updates the states. """
-
+        """Get the latest data and updates the states."""
         time_date = dt_util.utcnow()
-        time = dt_util.datetime_to_time_str(dt_util.as_local(time_date))
-        time_utc = dt_util.datetime_to_time_str(time_date)
-        date = dt_util.datetime_to_date_str(dt_util.as_local(time_date))
+        time = dt_util.as_local(time_date).strftime(TIME_STR_FORMAT)
+        time_utc = time_date.strftime(TIME_STR_FORMAT)
+        date = dt_util.as_local(time_date).date().isoformat()
 
-        # Calculate the beat (Swatch Internet Time) time without date.
-        hours, minutes, seconds = time_date.strftime('%H:%M:%S').split(':')
-        beat = ((int(seconds) + (int(minutes) * 60) + ((int(hours) + 1) *
-                                                       3600)) / 86.4)
+        # Calculate Swatch Internet Time.
+        time_bmt = time_date + timedelta(hours=1)
+        delta = timedelta(hours=time_bmt.hour,
+                          minutes=time_bmt.minute,
+                          seconds=time_bmt.second,
+                          microseconds=time_bmt.microsecond)
+        beat = int((delta.seconds + delta.microseconds / 1000000.0) / 86.4)
 
         if self.type == 'time':
             self._state = time
@@ -83,4 +96,4 @@ class TimeDateSensor(Entity):
         elif self.type == 'time_utc':
             self._state = time_utc
         elif self.type == 'beat':
-            self._state = '{0:.2f}'.format(beat)
+            self._state = '@{0:03d}'.format(beat)

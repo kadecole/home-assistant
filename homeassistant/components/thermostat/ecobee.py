@@ -1,92 +1,110 @@
 """
-homeassistant.components.thermostat.ecobee
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Platform for Ecobee Thermostats.
 
-Ecobee Thermostat Component
-
-This component adds support for Ecobee3 Wireless Thermostats.
-You will need to setup developer access to your thermostat,
-and create and API key on the ecobee website.
-
-The first time you run this component you will see a configuration
-component card in Home Assistant.  This card will contain a PIN code
-that you will need to use to authorize access to your thermostat.  You
-can do this at https://www.ecobee.com/consumerportal/index.html
-Click My Apps, Add application, Enter Pin and click Authorize.
-
-After authorizing the application click the button in the configuration
-card.  Now your thermostat and sensors should shown in home-assistant.
-
-You can use the optional hold_temp parameter to set whether or not holds
-are set indefintely or until the next scheduled event.
-
-ecobee:
-  api_key: asdfasdfasdfasdfasdfaasdfasdfasdfasdf
-  hold_temp: True
-
+For more details about this platform, please refer to the documentation at
+https://home-assistant.io/components/thermostat.ecobee/
 """
 import logging
+from os import path
+import voluptuous as vol
 
 from homeassistant.components import ecobee
-from homeassistant.components.thermostat import (ThermostatDevice, STATE_COOL,
-                                                 STATE_IDLE, STATE_HEAT)
-from homeassistant.const import (TEMP_FAHRENHEIT, STATE_ON, STATE_OFF)
+from homeassistant.components.thermostat import (
+    DOMAIN, STATE_COOL, STATE_HEAT, STATE_IDLE, ThermostatDevice)
+from homeassistant.const import (
+    ATTR_ENTITY_ID, STATE_OFF, STATE_ON, TEMP_FAHRENHEIT)
+from homeassistant.config import load_yaml_config_file
+import homeassistant.helpers.config_validation as cv
 
 DEPENDENCIES = ['ecobee']
-
 _LOGGER = logging.getLogger(__name__)
-
 ECOBEE_CONFIG_FILE = 'ecobee.conf'
 _CONFIGURING = {}
 
+ATTR_FAN_MIN_ON_TIME = "fan_min_on_time"
+SERVICE_SET_FAN_MIN_ON_TIME = "ecobee_set_fan_min_on_time"
+SET_FAN_MIN_ON_TIME_SCHEMA = vol.Schema({
+    vol.Optional(ATTR_ENTITY_ID): cv.entity_ids,
+    vol.Required(ATTR_FAN_MIN_ON_TIME): vol.Coerce(int),
+})
+
 
 def setup_platform(hass, config, add_devices, discovery_info=None):
-    """ Setup Platform """
+    """Setup the Ecobee Thermostat Platform."""
     if discovery_info is None:
         return
     data = ecobee.NETWORK
     hold_temp = discovery_info['hold_temp']
-    _LOGGER.info("Loading ecobee thermostat component with hold_temp set to "
-                 + str(hold_temp))
-    add_devices(Thermostat(data, index, hold_temp)
-                for index in range(len(data.ecobee.thermostats)))
+    _LOGGER.info(
+        "Loading ecobee thermostat component with hold_temp set to %s",
+        hold_temp)
+    devices = [Thermostat(data, index, hold_temp)
+               for index in range(len(data.ecobee.thermostats))]
+    add_devices(devices)
+
+    def fan_min_on_time_set_service(service):
+        """Set the minimum fan on time on the target thermostats."""
+        entity_id = service.data.get('entity_id')
+
+        if entity_id:
+            target_thermostats = [device for device in devices
+                                  if device.entity_id == entity_id]
+        else:
+            target_thermostats = devices
+
+        fan_min_on_time = service.data[ATTR_FAN_MIN_ON_TIME]
+
+        for thermostat in target_thermostats:
+            thermostat.set_fan_min_on_time(str(fan_min_on_time))
+
+            thermostat.update_ha_state(True)
+
+    descriptions = load_yaml_config_file(
+        path.join(path.dirname(__file__), 'services.yaml'))
+
+    hass.services.register(
+        DOMAIN, SERVICE_SET_FAN_MIN_ON_TIME, fan_min_on_time_set_service,
+        descriptions.get(SERVICE_SET_FAN_MIN_ON_TIME),
+        schema=SET_FAN_MIN_ON_TIME_SCHEMA)
 
 
+# pylint: disable=too-many-public-methods, abstract-method
 class Thermostat(ThermostatDevice):
-    """ Thermostat class for Ecobee """
+    """A thermostat class for Ecobee."""
 
     def __init__(self, data, thermostat_index, hold_temp):
+        """Initialize the thermostat."""
         self.data = data
         self.thermostat_index = thermostat_index
         self.thermostat = self.data.ecobee.get_thermostat(
             self.thermostat_index)
         self._name = self.thermostat['name']
-        self._away = 'away' in self.thermostat['program']['currentClimateRef']
         self.hold_temp = hold_temp
 
     def update(self):
+        """Get the latest state from the thermostat."""
         self.data.update()
         self.thermostat = self.data.ecobee.get_thermostat(
             self.thermostat_index)
 
     @property
     def name(self):
-        """ Returns the name of the Ecobee Thermostat. """
+        """Return the name of the Ecobee Thermostat."""
         return self.thermostat['name']
 
     @property
     def unit_of_measurement(self):
-        """ Unit of measurement this thermostat expresses itself in. """
+        """Return the unit of measurement."""
         return TEMP_FAHRENHEIT
 
     @property
     def current_temperature(self):
-        """ Returns the current temperature. """
+        """Return the current temperature."""
         return self.thermostat['runtime']['actualTemperature'] / 10
 
     @property
     def target_temperature(self):
-        """ Returns the temperature we try to reach. """
+        """Return the temperature we try to reach."""
         if self.hvac_mode == 'heat' or self.hvac_mode == 'auxHeatOnly':
             return self.target_temperature_low
         elif self.hvac_mode == 'cool':
@@ -97,27 +115,27 @@ class Thermostat(ThermostatDevice):
 
     @property
     def target_temperature_low(self):
-        """ Returns the lower bound temperature we try to reach. """
+        """Return the lower bound temperature we try to reach."""
         return int(self.thermostat['runtime']['desiredHeat'] / 10)
 
     @property
     def target_temperature_high(self):
-        """ Returns the upper bound temperature we try to reach. """
+        """Return the upper bound temperature we try to reach."""
         return int(self.thermostat['runtime']['desiredCool'] / 10)
 
     @property
     def humidity(self):
-        """ Returns the current humidity. """
+        """Return the current humidity."""
         return self.thermostat['runtime']['actualHumidity']
 
     @property
     def desired_fan_mode(self):
-        """ Returns the desired fan mode of operation. """
+        """Return the desired fan mode of operation."""
         return self.thermostat['runtime']['desiredFanMode']
 
     @property
     def fan(self):
-        """ Returns the current fan state. """
+        """Return the current fan state."""
         if 'fan' in self.thermostat['equipmentStatus']:
             return STATE_ON
         else:
@@ -125,7 +143,7 @@ class Thermostat(ThermostatDevice):
 
     @property
     def operation(self):
-        """ Returns current operation ie. heat, cool, idle """
+        """Return current operation ie. heat, cool, idle."""
         status = self.thermostat['equipmentStatus']
         if status == '':
             return STATE_IDLE
@@ -140,35 +158,44 @@ class Thermostat(ThermostatDevice):
 
     @property
     def mode(self):
-        """ Returns current mode ie. home, away, sleep """
-        mode = self.thermostat['program']['currentClimateRef']
-        self._away = 'away' in mode
-        return mode
+        """Return current mode ie. home, away, sleep."""
+        return self.thermostat['program']['currentClimateRef']
 
     @property
     def hvac_mode(self):
-        """ Return current hvac mode ie. auto, auxHeatOnly, cool, heat, off """
+        """Return current hvac mode ie. auto, auxHeatOnly, cool, heat, off."""
         return self.thermostat['settings']['hvacMode']
 
     @property
+    def fan_min_on_time(self):
+        """Return current fan minimum on time."""
+        return self.thermostat['settings']['fanMinOnTime']
+
+    @property
     def device_state_attributes(self):
-        """ Returns device specific state attributes. """
+        """Return device specific state attributes."""
         # Move these to Thermostat Device and make them global
         return {
             "humidity": self.humidity,
             "fan": self.fan,
             "mode": self.mode,
-            "hvac_mode": self.hvac_mode
+            "hvac_mode": self.hvac_mode,
+            "fan_min_on_time": self.fan_min_on_time
         }
 
     @property
     def is_away_mode_on(self):
-        """ Returns if away mode is on. """
-        return self._away
+        """Return true if away mode is on."""
+        mode = self.mode
+        events = self.thermostat['events']
+        for event in events:
+            if event['running']:
+                mode = event['holdClimateRef']
+                break
+        return 'away' in mode
 
     def turn_away_mode_on(self):
-        """ Turns away on. """
-        self._away = True
+        """Turn away on."""
         if self.hold_temp:
             self.data.ecobee.set_climate_hold(self.thermostat_index,
                                               "away", "indefinite")
@@ -176,12 +203,11 @@ class Thermostat(ThermostatDevice):
             self.data.ecobee.set_climate_hold(self.thermostat_index, "away")
 
     def turn_away_mode_off(self):
-        """ Turns away off. """
-        self._away = False
+        """Turn away off."""
         self.data.ecobee.resume_program(self.thermostat_index)
 
     def set_temperature(self, temperature):
-        """ Set new target temperature """
+        """Set new target temperature."""
         temperature = int(temperature)
         low_temp = temperature - 1
         high_temp = temperature + 1
@@ -193,27 +219,28 @@ class Thermostat(ThermostatDevice):
                                            high_temp)
 
     def set_hvac_mode(self, mode):
-        """ Set HVAC mode (auto, auxHeatOnly, cool, heat, off) """
+        """Set HVAC mode (auto, auxHeatOnly, cool, heat, off)."""
         self.data.ecobee.set_hvac_mode(self.thermostat_index, mode)
+
+    def set_fan_min_on_time(self, fan_min_on_time):
+        """Set the minimum fan on time."""
+        self.data.ecobee.set_fan_min_on_time(self.thermostat_index,
+                                             fan_min_on_time)
 
     # Home and Sleep mode aren't used in UI yet:
 
     # def turn_home_mode_on(self):
     #     """ Turns home mode on. """
-    #     self._away = False
     #     self.data.ecobee.set_climate_hold(self.thermostat_index, "home")
 
     # def turn_home_mode_off(self):
     #     """ Turns home mode off. """
-    #     self._away = False
     #     self.data.ecobee.resume_program(self.thermostat_index)
 
     # def turn_sleep_mode_on(self):
     #     """ Turns sleep mode on. """
-    #     self._away = False
     #     self.data.ecobee.set_climate_hold(self.thermostat_index, "sleep")
 
     # def turn_sleep_mode_off(self):
     #     """ Turns sleep mode off. """
-    #     self._away = False
     #     self.data.ecobee.resume_program(self.thermostat_index)

@@ -1,18 +1,16 @@
 """
-homeassistant.components.thermostat.radiotherm
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Adds support for Radio Thermostat wifi-enabled home thermostats.
+Support for Radio Thermostat wifi-enabled home thermostats.
 
 For more details about this platform, please refer to the documentation at
 https://home-assistant.io/components/thermostat.radiotherm/
 """
-import logging
 import datetime
+import logging
 from urllib.error import URLError
 
-from homeassistant.components.thermostat import (ThermostatDevice, STATE_COOL,
-                                                 STATE_IDLE, STATE_HEAT)
-from homeassistant.const import (CONF_HOST, TEMP_FAHRENHEIT)
+from homeassistant.components.thermostat import (
+    STATE_COOL, STATE_HEAT, STATE_IDLE, ThermostatDevice)
+from homeassistant.const import CONF_HOST, TEMP_FAHRENHEIT
 
 REQUIREMENTS = ['radiotherm==1.2']
 HOLD_TEMP = 'hold_temp'
@@ -20,14 +18,8 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def setup_platform(hass, config, add_devices, discovery_info=None):
-    """ Sets up the Radio Thermostat. """
-    try:
-        import radiotherm
-    except ImportError:
-        _LOGGER.exception(
-            "Unable to import radiotherm. "
-            "Did you maybe not install the 'radiotherm' package?")
-        return False
+    """Setup the Radio Thermostat."""
+    import radiotherm
 
     hosts = []
     if CONF_HOST in config:
@@ -53,10 +45,12 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
     add_devices(tstats)
 
 
+# pylint: disable=abstract-method
 class RadioThermostat(ThermostatDevice):
-    """ Represent a Radio Thermostat. """
+    """Representation of a Radio Thermostat."""
 
     def __init__(self, device, hold_temp):
+        """Initialize the thermostat."""
         self.device = device
         self.set_time()
         self._target_temperature = None
@@ -68,17 +62,17 @@ class RadioThermostat(ThermostatDevice):
 
     @property
     def name(self):
-        """ Returns the name of the Radio Thermostat. """
+        """Return the name of the Radio Thermostat."""
         return self._name
 
     @property
     def unit_of_measurement(self):
-        """ Unit of measurement this thermostat expresses itself in. """
+        """Return the unit of measurement."""
         return TEMP_FAHRENHEIT
 
     @property
     def device_state_attributes(self):
-        """ Returns device specific state attributes. """
+        """Return the device specific state attributes."""
         return {
             "fan": self.device.fmode['human'],
             "mode": self.device.tmode['human']
@@ -86,22 +80,21 @@ class RadioThermostat(ThermostatDevice):
 
     @property
     def current_temperature(self):
-        """ Returns the current temperature. """
-        return round(self._current_temperature, 1)
+        """Return the current temperature."""
+        return self._current_temperature
 
     @property
     def operation(self):
-        """ Returns current operation. head, cool idle """
+        """Return the current operation. head, cool idle."""
         return self._operation
 
     @property
     def target_temperature(self):
-        """ Returns the temperature we try to reach. """
-
-        return round(self._target_temperature, 1)
+        """Return the temperature we try to reach."""
+        return self._target_temperature
 
     def update(self):
-        """ Update the data from the thermostat. """
+        """Update the data from the thermostat."""
         self._current_temperature = self.device.temp['raw']
         self._name = self.device.name['raw']
         if self.device.tmode['human'] == 'Cool':
@@ -114,7 +107,7 @@ class RadioThermostat(ThermostatDevice):
             self._operation = STATE_IDLE
 
     def set_temperature(self, temperature):
-        """ Set new target temperature """
+        """Set new target temperature."""
         if self._operation == STATE_COOL:
             self.device.t_cool = temperature
         elif self._operation == STATE_HEAT:
@@ -125,7 +118,7 @@ class RadioThermostat(ThermostatDevice):
             self.device.hold = 0
 
     def set_time(self):
-        """ Set device time """
+        """Set device time."""
         now = datetime.datetime.now()
         self.device.time = {'day': now.weekday(),
                             'hour': now.hour, 'minute': now.minute}

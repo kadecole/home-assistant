@@ -1,6 +1,4 @@
 """
-homeassistant.components.switch.verisure
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Support for Verisure Smartplugs.
 
 For more details about this platform, please refer to the documentation at
@@ -8,59 +6,59 @@ documentation at https://home-assistant.io/components/verisure/
 """
 import logging
 
-import homeassistant.components.verisure as verisure
+from homeassistant.components.verisure import HUB as hub
 from homeassistant.components.switch import SwitchDevice
 
 _LOGGER = logging.getLogger(__name__)
 
 
 def setup_platform(hass, config, add_devices, discovery_info=None):
-    """ Sets up the Verisure platform. """
-
-    if not verisure.MY_PAGES:
-        _LOGGER.error('A connection has not been made to Verisure mypages.')
+    """Setup the Verisure platform."""
+    if not int(hub.config.get('smartplugs', '1')):
         return False
 
+    hub.update_smartplugs()
     switches = []
-
     switches.extend([
-        VerisureSmartplug(value)
-        for value in verisure.get_smartplug_status().values()
-        if verisure.SHOW_SMARTPLUGS
-        ])
-
+        VerisureSmartplug(value.deviceLabel)
+        for value in hub.smartplug_status.values()])
     add_devices(switches)
 
 
 class VerisureSmartplug(SwitchDevice):
-    """ Represents a Verisure smartplug. """
-    def __init__(self, smartplug_status):
-        self._id = smartplug_status.id
-        self.status_on = verisure.MY_PAGES.SMARTPLUG_ON
-        self.status_off = verisure.MY_PAGES.SMARTPLUG_OFF
+    """Representation of a Verisure smartplug."""
+
+    def __init__(self, device_id):
+        """Initialize the Verisure device."""
+        self._id = device_id
 
     @property
     def name(self):
-        """ Get the name (location) of the smartplug. """
-        return verisure.get_smartplug_status()[self._id].location
+        """Return the name or location of the smartplug."""
+        return hub.smartplug_status[self._id].location
 
     @property
     def is_on(self):
-        """ Returns True if on """
-        plug_status = verisure.get_smartplug_status()[self._id].status
-        return plug_status == self.status_on
+        """Return true if on."""
+        return hub.smartplug_status[self._id].status == 'on'
+
+    @property
+    def available(self):
+        """Return True if entity is available."""
+        return hub.available
 
     def turn_on(self):
-        """ Set smartplug status on. """
-        verisure.MY_PAGES.set_smartplug_status(
-            self._id,
-            self.status_on)
+        """Set smartplug status on."""
+        hub.my_pages.smartplug.set(self._id, 'on')
+        hub.my_pages.smartplug.wait_while_updating(self._id, 'on')
+        self.update()
 
     def turn_off(self):
-        """ Set smartplug status off. """
-        verisure.MY_PAGES.set_smartplug_status(
-            self._id,
-            self.status_off)
+        """Set smartplug status off."""
+        hub.my_pages.smartplug.set(self._id, 'off')
+        hub.my_pages.smartplug.wait_while_updating(self._id, 'off')
+        self.update()
 
     def update(self):
-        verisure.update()
+        """Get the latest date of the smartplug."""
+        hub.update_smartplugs()

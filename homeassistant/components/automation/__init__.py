@@ -1,26 +1,26 @@
 """
-homeassistant.components.automation
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Allows to setup simple automation rules via the config file.
+Allow to setup simple automation rules via the config file.
 
 For more details about this component, please refer to the documentation at
 https://home-assistant.io/components/automation/
 """
 import logging
 
+import voluptuous as vol
+
 from homeassistant.bootstrap import prepare_setup_platform
-from homeassistant.util import split_entity_id
 from homeassistant.const import ATTR_ENTITY_ID, CONF_PLATFORM
 from homeassistant.components import logbook
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import extract_domain_configs, script, condition
+from homeassistant.loader import get_platform
+import homeassistant.helpers.config_validation as cv
 
 DOMAIN = 'automation'
 
 DEPENDENCIES = ['group']
 
 CONF_ALIAS = 'alias'
-CONF_SERVICE = 'service'
-CONF_SERVICE_ENTITY_ID = 'entity_id'
-CONF_SERVICE_DATA = 'data'
 
 CONF_CONDITION = 'condition'
 CONF_ACTION = 'action'
@@ -33,47 +33,86 @@ CONDITION_TYPE_OR = 'or'
 
 DEFAULT_CONDITION_TYPE = CONDITION_TYPE_AND
 
+METHOD_TRIGGER = 'trigger'
+METHOD_IF_ACTION = 'if_action'
+
 _LOGGER = logging.getLogger(__name__)
 
 
+def _platform_validator(method, schema):
+    """Generate platform validator for different steps."""
+    def validator(config):
+        """Validate it is a valid  platform."""
+        platform = get_platform(DOMAIN, config[CONF_PLATFORM])
+
+        if not hasattr(platform, method):
+            raise vol.Invalid('invalid method platform')
+
+        if not hasattr(platform, schema):
+            return config
+
+        return getattr(platform, schema)(config)
+
+    return validator
+
+_TRIGGER_SCHEMA = vol.All(
+    cv.ensure_list,
+    [
+        vol.All(
+            vol.Schema({
+                vol.Required(CONF_PLATFORM): cv.platform_validator(DOMAIN)
+            }, extra=vol.ALLOW_EXTRA),
+            _platform_validator(METHOD_TRIGGER, 'TRIGGER_SCHEMA')
+        ),
+    ]
+)
+
+_CONDITION_SCHEMA = vol.Any(
+    CONDITION_USE_TRIGGER_VALUES,
+    vol.All(
+        cv.ensure_list,
+        [
+            vol.All(
+                vol.Schema({
+                    CONF_PLATFORM: str,
+                    CONF_CONDITION: str,
+                }, extra=vol.ALLOW_EXTRA),
+                cv.has_at_least_one_key(CONF_PLATFORM, CONF_CONDITION),
+            ),
+        ]
+    )
+)
+
+PLATFORM_SCHEMA = vol.Schema({
+    CONF_ALIAS: cv.string,
+    vol.Required(CONF_TRIGGER): _TRIGGER_SCHEMA,
+    vol.Required(CONF_CONDITION_TYPE, default=DEFAULT_CONDITION_TYPE):
+        vol.All(vol.Lower, vol.Any(CONDITION_TYPE_AND, CONDITION_TYPE_OR)),
+    CONF_CONDITION: _CONDITION_SCHEMA,
+    vol.Required(CONF_ACTION): cv.SCRIPT_SCHEMA,
+})
+
+
 def setup(hass, config):
-    """ Sets up automation. """
-    config_key = DOMAIN
-    found = 1
+    """Setup the automation."""
+    success = False
+    for config_key in extract_domain_configs(config, DOMAIN):
+        conf = config[config_key]
 
-    while config_key in config:
-        # check for one block syntax
-        if isinstance(config[config_key], dict):
-            config_block = _migrate_old_config(config[config_key])
-            name = config_block.get(CONF_ALIAS, config_key)
-            _setup_automation(hass, config_block, name, config)
+        for list_no, config_block in enumerate(conf):
+            name = config_block.get(CONF_ALIAS, "{}, {}".format(config_key,
+                                                                list_no))
+            success = (_setup_automation(hass, config_block, name, config) or
+                       success)
 
-        # check for multiple block syntax
-        elif isinstance(config[config_key], list):
-            for list_no, config_block in enumerate(config[config_key]):
-                name = config_block.get(CONF_ALIAS,
-                                        "{}, {}".format(config_key, list_no))
-                _setup_automation(hass, config_block, name, config)
-
-        # any scalar value is incorrect
-        else:
-            _LOGGER.error('Error in config in section %s.', config_key)
-
-        found += 1
-        config_key = "{} {}".format(DOMAIN, found)
-
-    return True
+    return success
 
 
 def _setup_automation(hass, config_block, name, config):
-    """ Setup one instance of automation """
-
+    """Setup one instance of automation."""
     action = _get_action(hass, config_block.get(CONF_ACTION, {}), name)
 
-    if action is None:
-        return False
-
-    if CONF_CONDITION in config_block or CONF_CONDITION_TYPE in config_block:
+    if CONF_CONDITION in config_block:
         action = _process_if(hass, config, config_block, action)
 
         if action is None:
@@ -85,76 +124,27 @@ def _setup_automation(hass, config_block, name, config):
 
 
 def _get_action(hass, config, name):
-    """ Return an action based on a config. """
+    """Return an action based on a configuration."""
+    script_obj = script.Script(hass, config, name)
 
-    if CONF_SERVICE not in config:
-        _LOGGER.error('Error setting up %s, no action specified.', name)
-        return None
-
-    def action():
-        """ Action to be executed. """
+    def action(variables=None):
+        """Action to be executed."""
         _LOGGER.info('Executing %s', name)
         logbook.log_entry(hass, name, 'has been triggered', DOMAIN)
-
-        domain, service = split_entity_id(config[CONF_SERVICE])
-        service_data = config.get(CONF_SERVICE_DATA, {})
-
-        if not isinstance(service_data, dict):
-            _LOGGER.error("%s should be a dictionary", CONF_SERVICE_DATA)
-            service_data = {}
-
-        if CONF_SERVICE_ENTITY_ID in config:
-            try:
-                service_data[ATTR_ENTITY_ID] = \
-                    config[CONF_SERVICE_ENTITY_ID].split(",")
-            except AttributeError:
-                service_data[ATTR_ENTITY_ID] = \
-                    config[CONF_SERVICE_ENTITY_ID]
-
-        hass.services.call(domain, service, service_data)
+        script_obj.run(variables)
 
     return action
 
 
-def _migrate_old_config(config):
-    """ Migrate old config to new. """
-    if CONF_PLATFORM not in config:
-        return config
-
-    _LOGGER.warning(
-        'You are using an old configuration format. Please upgrade: '
-        'https://home-assistant.io/components/automation/')
-
-    new_conf = {
-        CONF_TRIGGER: dict(config),
-        CONF_CONDITION: config.get('if', []),
-        CONF_ACTION: dict(config),
-    }
-
-    for cat, key, new_key in (('trigger', 'mqtt_topic', 'topic'),
-                              ('trigger', 'mqtt_payload', 'payload'),
-                              ('trigger', 'state_entity_id', 'entity_id'),
-                              ('trigger', 'state_before', 'before'),
-                              ('trigger', 'state_after', 'after'),
-                              ('trigger', 'state_to', 'to'),
-                              ('trigger', 'state_from', 'from'),
-                              ('trigger', 'state_hours', 'hours'),
-                              ('trigger', 'state_minutes', 'minutes'),
-                              ('trigger', 'state_seconds', 'seconds'),
-                              ('action', 'execute_service', 'service'),
-                              ('action', 'service_entity_id', 'entity_id'),
-                              ('action', 'service_data', 'data')):
-        if key in new_conf[cat]:
-            new_conf[cat][new_key] = new_conf[cat].pop(key)
-
-    return new_conf
-
-
 def _process_if(hass, config, p_config, action):
-    """ Processes if checks. """
-
+    """Process if checks."""
     cond_type = p_config.get(CONF_CONDITION_TYPE,
                              DEFAULT_CONDITION_TYPE).lower()
+
+    # Deprecated since 0.19 - 5/5/2016
+    if cond_type != DEFAULT_CONDITION_TYPE:
+        _LOGGER.warning('Using condition_type: "or" is deprecated. Please use '
+                        '"condition: or" instead.')
 
     if_configs = p_config.get(CONF_CONDITION)
     use_trigger = if_configs == CONDITION_USE_TRIGGER_VALUES
@@ -162,45 +152,51 @@ def _process_if(hass, config, p_config, action):
     if use_trigger:
         if_configs = p_config[CONF_TRIGGER]
 
-    if isinstance(if_configs, dict):
-        if_configs = [if_configs]
-
     checks = []
     for if_config in if_configs:
-        platform = _resolve_platform('if_action', hass, config,
-                                     if_config.get(CONF_PLATFORM))
-        if platform is None:
-            continue
+        # Deprecated except for used by use_trigger_values
+        # since 0.19 - 5/5/2016
+        if CONF_PLATFORM in if_config:
+            if not use_trigger:
+                _LOGGER.warning("Please switch your condition configuration "
+                                "to use 'condition' instead of 'platform'.")
+            if_config = dict(if_config)
+            if_config[CONF_CONDITION] = if_config.pop(CONF_PLATFORM)
 
-        check = platform.if_action(hass, if_config)
+            # To support use_trigger_values with state trigger accepting
+            # multiple entity_ids to monitor.
+            if_entity_id = if_config.get(ATTR_ENTITY_ID)
+            if isinstance(if_entity_id, list) and len(if_entity_id) == 1:
+                if_config[ATTR_ENTITY_ID] = if_entity_id[0]
 
-        # Invalid conditions are allowed if we base it on trigger
-        if check is None and not use_trigger:
-            return None
-
-        checks.append(check)
+        try:
+            checks.append(condition.from_config(if_config))
+        except HomeAssistantError as ex:
+            # Invalid conditions are allowed if we base it on trigger
+            if use_trigger:
+                _LOGGER.warning('Ignoring invalid condition: %s', ex)
+            else:
+                _LOGGER.warning('Invalid condition: %s', ex)
+                return None
 
     if cond_type == CONDITION_TYPE_AND:
-        def if_action():
-            """ AND all conditions. """
-            if all(check() for check in checks):
-                action()
+        def if_action(variables=None):
+            """AND all conditions."""
+            if all(check(hass, variables) for check in checks):
+                action(variables)
     else:
-        def if_action():
-            """ OR all conditions. """
-            if any(check() for check in checks):
-                action()
+        def if_action(variables=None):
+            """OR all conditions."""
+            if any(check(hass, variables) for check in checks):
+                action(variables)
 
     return if_action
 
 
 def _process_trigger(hass, config, trigger_configs, name, action):
-    """ Setup triggers. """
-    if isinstance(trigger_configs, dict):
-        trigger_configs = [trigger_configs]
-
+    """Setup the triggers."""
     for conf in trigger_configs:
-        platform = _resolve_platform('trigger', hass, config,
+        platform = _resolve_platform(METHOD_TRIGGER, hass, config,
                                      conf.get(CONF_PLATFORM))
         if platform is None:
             continue
@@ -212,7 +208,7 @@ def _process_trigger(hass, config, trigger_configs, name, action):
 
 
 def _resolve_platform(method, hass, config, platform):
-    """ Find automation platform. """
+    """Find the automation platform."""
     if platform is None:
         return None
     platform = prepare_setup_platform(hass, config, DOMAIN, platform)

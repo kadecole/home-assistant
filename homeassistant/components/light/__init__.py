@@ -1,6 +1,4 @@
 """
-homeassistant.components.light
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Provides functionality to interact with lights.
 
 For more details about this component, please refer to the documentation at
@@ -10,13 +8,17 @@ import logging
 import os
 import csv
 
-from homeassistant.components import group, discovery, wink, isy994, zwave
+import voluptuous as vol
+
+from homeassistant.components import group
 from homeassistant.config import load_yaml_config_file
 from homeassistant.const import (
-    STATE_ON, SERVICE_TURN_ON, SERVICE_TURN_OFF, ATTR_ENTITY_ID)
+    STATE_ON, SERVICE_TURN_ON, SERVICE_TURN_OFF, SERVICE_TOGGLE,
+    ATTR_ENTITY_ID)
 from homeassistant.helpers.entity import ToggleEntity
 from homeassistant.helpers.entity_component import EntityComponent
-import homeassistant.util as util
+from homeassistant.helpers.config_validation import PLATFORM_SCHEMA  # noqa
+import homeassistant.helpers.config_validation as cv
 import homeassistant.util.color as color_util
 
 
@@ -28,39 +30,33 @@ ENTITY_ID_ALL_LIGHTS = group.ENTITY_ID_FORMAT.format('all_lights')
 
 ENTITY_ID_FORMAT = DOMAIN + ".{}"
 
-# integer that represents transition time in seconds to make change
+# Integer that represents transition time in seconds to make change.
 ATTR_TRANSITION = "transition"
 
-# lists holding color values
+# Lists holding color values
 ATTR_RGB_COLOR = "rgb_color"
 ATTR_XY_COLOR = "xy_color"
 ATTR_COLOR_TEMP = "color_temp"
+ATTR_COLOR_NAME = "color_name"
 
-# int with value 0 .. 255 representing brightness of the light
+# int with value 0 .. 255 representing brightness of the light.
 ATTR_BRIGHTNESS = "brightness"
 
-# String representing a profile (built-in ones or external defined)
+# String representing a profile (built-in ones or external defined).
 ATTR_PROFILE = "profile"
 
-# If the light should flash, can be FLASH_SHORT or FLASH_LONG
+# If the light should flash, can be FLASH_SHORT or FLASH_LONG.
 ATTR_FLASH = "flash"
 FLASH_SHORT = "short"
 FLASH_LONG = "long"
 
-# Apply an effect to the light, can be EFFECT_COLORLOOP
+# Apply an effect to the light, can be EFFECT_COLORLOOP.
 ATTR_EFFECT = "effect"
 EFFECT_COLORLOOP = "colorloop"
+EFFECT_RANDOM = "random"
 EFFECT_WHITE = "white"
 
 LIGHT_PROFILES_FILE = "light_profiles.csv"
-
-# Maps discovered services to their platforms
-DISCOVERY_PLATFORMS = {
-    wink.DISCOVER_LIGHTS: 'wink',
-    isy994.DISCOVER_LIGHTS: 'isy994',
-    discovery.SERVICE_HUE: 'hue',
-    zwave.DISCOVER_LIGHTS: 'zwave',
-}
 
 PROP_TO_ATTR = {
     'brightness': ATTR_BRIGHTNESS,
@@ -69,21 +65,52 @@ PROP_TO_ATTR = {
     'xy_color': ATTR_XY_COLOR,
 }
 
+# Service call validation schemas
+VALID_TRANSITION = vol.All(vol.Coerce(int), vol.Clamp(min=0, max=900))
+
+LIGHT_TURN_ON_SCHEMA = vol.Schema({
+    ATTR_ENTITY_ID: cv.entity_ids,
+    ATTR_PROFILE: str,
+    ATTR_TRANSITION: VALID_TRANSITION,
+    ATTR_BRIGHTNESS: cv.byte,
+    ATTR_COLOR_NAME: str,
+    ATTR_RGB_COLOR: vol.All(vol.ExactSequence((cv.byte, cv.byte, cv.byte)),
+                            vol.Coerce(tuple)),
+    ATTR_XY_COLOR: vol.All(vol.ExactSequence((cv.small_float, cv.small_float)),
+                           vol.Coerce(tuple)),
+    ATTR_COLOR_TEMP: vol.All(int, vol.Range(min=154, max=500)),
+    ATTR_FLASH: vol.In([FLASH_SHORT, FLASH_LONG]),
+    ATTR_EFFECT: vol.In([EFFECT_COLORLOOP, EFFECT_RANDOM, EFFECT_WHITE]),
+})
+
+LIGHT_TURN_OFF_SCHEMA = vol.Schema({
+    ATTR_ENTITY_ID: cv.entity_ids,
+    ATTR_TRANSITION: VALID_TRANSITION,
+})
+
+LIGHT_TOGGLE_SCHEMA = vol.Schema({
+    ATTR_ENTITY_ID: cv.entity_ids,
+    ATTR_TRANSITION: VALID_TRANSITION,
+})
+
+PROFILE_SCHEMA = vol.Schema(
+    vol.ExactSequence((str, cv.small_float, cv.small_float, cv.byte))
+)
+
 _LOGGER = logging.getLogger(__name__)
 
 
 def is_on(hass, entity_id=None):
-    """ Returns if the lights are on based on the statemachine. """
+    """Return if the lights are on based on the statemachine."""
     entity_id = entity_id or ENTITY_ID_ALL_LIGHTS
-
     return hass.states.is_state(entity_id, STATE_ON)
 
 
 # pylint: disable=too-many-arguments
 def turn_on(hass, entity_id=None, transition=None, brightness=None,
             rgb_color=None, xy_color=None, color_temp=None, profile=None,
-            flash=None, effect=None):
-    """ Turns all or specified light on. """
+            flash=None, effect=None, color_name=None):
+    """Turn all or specified light on."""
     data = {
         key: value for key, value in [
             (ATTR_ENTITY_ID, entity_id),
@@ -95,6 +122,7 @@ def turn_on(hass, entity_id=None, transition=None, brightness=None,
             (ATTR_COLOR_TEMP, color_temp),
             (ATTR_FLASH, flash),
             (ATTR_EFFECT, effect),
+            (ATTR_COLOR_NAME, color_name),
         ] if value is not None
     }
 
@@ -102,7 +130,7 @@ def turn_on(hass, entity_id=None, transition=None, brightness=None,
 
 
 def turn_off(hass, entity_id=None, transition=None):
-    """ Turns all or specified light off. """
+    """Turn all or specified light off."""
     data = {
         key: value for key, value in [
             (ATTR_ENTITY_ID, entity_id),
@@ -113,13 +141,23 @@ def turn_off(hass, entity_id=None, transition=None):
     hass.services.call(DOMAIN, SERVICE_TURN_OFF, data)
 
 
+def toggle(hass, entity_id=None, transition=None):
+    """Toggle all or specified light."""
+    data = {
+        key: value for key, value in [
+            (ATTR_ENTITY_ID, entity_id),
+            (ATTR_TRANSITION, transition),
+        ] if value is not None
+    }
+
+    hass.services.call(DOMAIN, SERVICE_TOGGLE, data)
+
+
 # pylint: disable=too-many-branches, too-many-locals, too-many-statements
 def setup(hass, config):
-    """ Exposes light control via statemachine and services. """
-
+    """Expose light control via statemachine and services."""
     component = EntityComponent(
-        _LOGGER, DOMAIN, hass, SCAN_INTERVAL, DISCOVERY_PLATFORMS,
-        GROUP_NAME_ALL_LIGHTS)
+        _LOGGER, DOMAIN, hass, SCAN_INTERVAL, GROUP_NAME_ALL_LIGHTS)
     component.setup(config)
 
     # Load built-in profiles and custom profiles
@@ -138,98 +176,49 @@ def setup(hass, config):
             next(reader, None)
 
             try:
-                for profile_id, color_x, color_y, brightness in reader:
-                    profiles[profile_id] = (float(color_x), float(color_y),
-                                            int(brightness))
-            except ValueError:
-                # ValueError if not 4 values per row
-                # ValueError if convert to float/int failed
-                _LOGGER.error(
-                    "Error parsing light profiles from %s", profile_path)
-
+                for rec in reader:
+                    profile, color_x, color_y, brightness = PROFILE_SCHEMA(rec)
+                    profiles[profile] = (color_x, color_y, brightness)
+            except vol.MultipleInvalid as ex:
+                _LOGGER.error("Error parsing light profile from %s: %s",
+                              profile_path, ex)
                 return False
 
     def handle_light_service(service):
-        """ Hande a turn light on or off service call. """
-        # Get and validate data
-        dat = service.data
+        """Hande a turn light on or off service call."""
+        # Get the validated data
+        params = service.data.copy()
 
         # Convert the entity ids to valid light ids
         target_lights = component.extract_from_service(service)
+        params.pop(ATTR_ENTITY_ID, None)
 
-        params = {}
-
-        transition = util.convert(dat.get(ATTR_TRANSITION), int)
-
-        if transition is not None:
-            params[ATTR_TRANSITION] = transition
-
+        service_fun = None
         if service.service == SERVICE_TURN_OFF:
+            service_fun = 'turn_off'
+        elif service.service == SERVICE_TOGGLE:
+            service_fun = 'toggle'
+
+        if service_fun:
             for light in target_lights:
-                light.turn_off(**params)
+                getattr(light, service_fun)(**params)
 
             for light in target_lights:
                 if light.should_poll:
                     light.update_ha_state(True)
             return
 
-        # Processing extra data for turn light on request
-
-        # We process the profile first so that we get the desired
-        # behavior that extra service data attributes overwrite
-        # profile values
-        profile = profiles.get(dat.get(ATTR_PROFILE))
+        # Processing extra data for turn light on request.
+        profile = profiles.get(params.pop(ATTR_PROFILE, None))
 
         if profile:
-            *params[ATTR_XY_COLOR], params[ATTR_BRIGHTNESS] = profile
+            params.setdefault(ATTR_XY_COLOR, profile[:2])
+            params.setdefault(ATTR_BRIGHTNESS, profile[2])
 
-        if ATTR_BRIGHTNESS in dat:
-            # We pass in the old value as the default parameter if parsing
-            # of the new one goes wrong.
-            params[ATTR_BRIGHTNESS] = util.convert(
-                dat.get(ATTR_BRIGHTNESS), int, params.get(ATTR_BRIGHTNESS))
+        color_name = params.pop(ATTR_COLOR_NAME, None)
 
-        if ATTR_XY_COLOR in dat:
-            try:
-                # xy_color should be a list containing 2 floats
-                xycolor = dat.get(ATTR_XY_COLOR)
-
-                # Without this check, a xycolor with value '99' would work
-                if not isinstance(xycolor, str):
-                    params[ATTR_XY_COLOR] = [float(val) for val in xycolor]
-
-            except (TypeError, ValueError):
-                # TypeError if xy_color is not iterable
-                # ValueError if value could not be converted to float
-                pass
-
-        if ATTR_COLOR_TEMP in dat:
-            # color_temp should be an int of mirads value
-            colortemp = dat.get(ATTR_COLOR_TEMP)
-
-            # Without this check, a ctcolor with value '99' would work
-            # These values are based on Philips Hue, may need ajustment later
-            if isinstance(colortemp, int) and 154 <= colortemp <= 500:
-                params[ATTR_COLOR_TEMP] = colortemp
-
-        if ATTR_RGB_COLOR in dat:
-            try:
-                # rgb_color should be a list containing 3 ints
-                rgb_color = dat.get(ATTR_RGB_COLOR)
-
-                if len(rgb_color) == 3:
-                    params[ATTR_RGB_COLOR] = [int(val) for val in rgb_color]
-
-            except (TypeError, ValueError):
-                # TypeError if rgb_color is not iterable
-                # ValueError if not all values can be converted to int
-                pass
-
-        if dat.get(ATTR_FLASH) in (FLASH_SHORT, FLASH_LONG):
-            params[ATTR_FLASH] = dat[ATTR_FLASH]
-
-        if dat.get(ATTR_EFFECT) in (EFFECT_COLORLOOP, EFFECT_WHITE):
-            params[ATTR_EFFECT] = dat[ATTR_EFFECT]
+        if color_name is not None:
+            params[ATTR_RGB_COLOR] = color_util.color_name_to_rgb(color_name)
 
         for light in target_lights:
             light.turn_on(**params)
@@ -238,50 +227,52 @@ def setup(hass, config):
             if light.should_poll:
                 light.update_ha_state(True)
 
-    # Listen for light on and light off service calls
+    # Listen for light on and light off service calls.
     descriptions = load_yaml_config_file(
         os.path.join(os.path.dirname(__file__), 'services.yaml'))
     hass.services.register(DOMAIN, SERVICE_TURN_ON, handle_light_service,
-                           descriptions.get(SERVICE_TURN_ON))
+                           descriptions.get(SERVICE_TURN_ON),
+                           schema=LIGHT_TURN_ON_SCHEMA)
 
     hass.services.register(DOMAIN, SERVICE_TURN_OFF, handle_light_service,
-                           descriptions.get(SERVICE_TURN_OFF))
+                           descriptions.get(SERVICE_TURN_OFF),
+                           schema=LIGHT_TURN_OFF_SCHEMA)
+
+    hass.services.register(DOMAIN, SERVICE_TOGGLE, handle_light_service,
+                           descriptions.get(SERVICE_TOGGLE),
+                           schema=LIGHT_TOGGLE_SCHEMA)
 
     return True
 
 
 class Light(ToggleEntity):
-    """ Represents a light within Home Assistant. """
-    # pylint: disable=no-self-use
+    """Representation of a light."""
+
+    # pylint: disable=no-self-use, abstract-method
 
     @property
     def brightness(self):
-        """ Brightness of this light between 0..255. """
+        """Return the brightness of this light between 0..255."""
         return None
 
     @property
     def xy_color(self):
-        """ XY color value [float, float]. """
+        """Return the XY color value [float, float]."""
         return None
 
     @property
     def rgb_color(self):
-        """ RGB color value [int, int, int] """
+        """Return the RGB color value [int, int, int]."""
         return None
 
     @property
     def color_temp(self):
-        """ CT color value in mirads. """
-        return None
-
-    @property
-    def device_state_attributes(self):
-        """ Returns device specific state attributes. """
+        """Return the CT color value in mireds."""
         return None
 
     @property
     def state_attributes(self):
-        """ Returns optional state attributes. """
+        """Return optional state attributes."""
         data = {}
 
         if self.is_on:
@@ -295,10 +286,5 @@ class Light(ToggleEntity):
                 data[ATTR_RGB_COLOR] = color_util.color_xy_brightness_to_RGB(
                     data[ATTR_XY_COLOR][0], data[ATTR_XY_COLOR][1],
                     data[ATTR_BRIGHTNESS])
-
-        device_attr = self.device_state_attributes
-
-        if device_attr is not None:
-            data.update(device_attr)
 
         return data

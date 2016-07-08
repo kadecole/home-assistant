@@ -1,21 +1,19 @@
-"""
-tests.components.automation.test_location
-±±±~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Tests location automation.
-"""
+"""The tests for the location automation."""
 import unittest
 
+from homeassistant.bootstrap import _setup_component
 from homeassistant.components import automation, zone
 
 from tests.common import get_test_home_assistant
 
 
 class TestAutomationZone(unittest.TestCase):
-    """ Test the event automation. """
+    """Test the event automation."""
 
     def setUp(self):  # pylint: disable=invalid-name
+        """Setup things to be run when tests are started."""
         self.hass = get_test_home_assistant()
+        self.hass.config.components.append('group')
         zone.setup(self.hass, {
             'zone': {
                 'name': 'test',
@@ -33,17 +31,18 @@ class TestAutomationZone(unittest.TestCase):
         self.hass.services.register('test', 'automation', record_call)
 
     def tearDown(self):  # pylint: disable=invalid-name
-        """ Stop down stuff we started. """
+        """Stop everything that was started."""
         self.hass.stop()
 
     def test_if_fires_on_zone_enter(self):
+        """Test for firing on zone enter."""
         self.hass.states.set('test.entity', 'hello', {
             'latitude': 32.881011,
             'longitude': -117.234758
         })
         self.hass.pool.block_till_done()
 
-        self.assertTrue(automation.setup(self.hass, {
+        assert _setup_component(self.hass, automation.DOMAIN, {
             automation.DOMAIN: {
                 'trigger': {
                     'platform': 'zone',
@@ -53,9 +52,16 @@ class TestAutomationZone(unittest.TestCase):
                 },
                 'action': {
                     'service': 'test.automation',
+                    'data_template': {
+                        'some': '{{ trigger.%s }}' % '}} - {{ trigger.'.join((
+                                    'platform', 'entity_id',
+                                    'from_state.state', 'to_state.state',
+                                    'zone.name'))
+                    },
+
                 }
             }
-        }))
+        })
 
         self.hass.states.set('test.entity', 'hello', {
             'latitude': 32.880586,
@@ -64,15 +70,19 @@ class TestAutomationZone(unittest.TestCase):
         self.hass.pool.block_till_done()
 
         self.assertEqual(1, len(self.calls))
+        self.assertEqual(
+            'zone - test.entity - hello - hello - test',
+            self.calls[0].data['some'])
 
     def test_if_not_fires_for_enter_on_zone_leave(self):
+        """Test for not firing on zone leave."""
         self.hass.states.set('test.entity', 'hello', {
             'latitude': 32.880586,
             'longitude': -117.237564
         })
         self.hass.pool.block_till_done()
 
-        self.assertTrue(automation.setup(self.hass, {
+        assert _setup_component(self.hass, automation.DOMAIN, {
             automation.DOMAIN: {
                 'trigger': {
                     'platform': 'zone',
@@ -84,7 +94,7 @@ class TestAutomationZone(unittest.TestCase):
                     'service': 'test.automation',
                 }
             }
-        }))
+        })
 
         self.hass.states.set('test.entity', 'hello', {
             'latitude': 32.881011,
@@ -95,13 +105,14 @@ class TestAutomationZone(unittest.TestCase):
         self.assertEqual(0, len(self.calls))
 
     def test_if_fires_on_zone_leave(self):
+        """Test for firing on zone leave."""
         self.hass.states.set('test.entity', 'hello', {
             'latitude': 32.880586,
             'longitude': -117.237564
         })
         self.hass.pool.block_till_done()
 
-        self.assertTrue(automation.setup(self.hass, {
+        assert _setup_component(self.hass, automation.DOMAIN, {
             automation.DOMAIN: {
                 'trigger': {
                     'platform': 'zone',
@@ -113,7 +124,7 @@ class TestAutomationZone(unittest.TestCase):
                     'service': 'test.automation',
                 }
             }
-        }))
+        })
 
         self.hass.states.set('test.entity', 'hello', {
             'latitude': 32.881011,
@@ -124,13 +135,14 @@ class TestAutomationZone(unittest.TestCase):
         self.assertEqual(1, len(self.calls))
 
     def test_if_not_fires_for_leave_on_zone_enter(self):
+        """Test for not firing on zone enter."""
         self.hass.states.set('test.entity', 'hello', {
             'latitude': 32.881011,
             'longitude': -117.234758
         })
         self.hass.pool.block_till_done()
 
-        self.assertTrue(automation.setup(self.hass, {
+        assert _setup_component(self.hass, automation.DOMAIN, {
             automation.DOMAIN: {
                 'trigger': {
                     'platform': 'zone',
@@ -142,7 +154,7 @@ class TestAutomationZone(unittest.TestCase):
                     'service': 'test.automation',
                 }
             }
-        }))
+        })
 
         self.hass.states.set('test.entity', 'hello', {
             'latitude': 32.880586,
@@ -153,13 +165,14 @@ class TestAutomationZone(unittest.TestCase):
         self.assertEqual(0, len(self.calls))
 
     def test_zone_condition(self):
+        """Test for zone condition."""
         self.hass.states.set('test.entity', 'hello', {
             'latitude': 32.880586,
             'longitude': -117.237564
         })
         self.hass.pool.block_till_done()
 
-        self.assertTrue(automation.setup(self.hass, {
+        assert _setup_component(self.hass, automation.DOMAIN, {
             automation.DOMAIN: {
                 'trigger': {
                     'platform': 'event',
@@ -174,7 +187,7 @@ class TestAutomationZone(unittest.TestCase):
                     'service': 'test.automation',
                 }
             }
-        }))
+        })
 
         self.hass.bus.fire('test_event')
         self.hass.pool.block_till_done()

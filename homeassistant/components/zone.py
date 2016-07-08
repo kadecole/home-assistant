@@ -1,7 +1,5 @@
 """
-homeassistant.components.zone
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Allows defintion of zones in Home Assistant.
+Support for the definition of zones.
 
 For more details about this component, please refer to the documentation at
 https://home-assistant.io/components/zone/
@@ -10,9 +8,10 @@ import logging
 
 from homeassistant.const import (
     ATTR_HIDDEN, ATTR_ICON, ATTR_LATITUDE, ATTR_LONGITUDE, CONF_NAME)
-from homeassistant.helpers import extract_domain_configs, generate_entity_id
-from homeassistant.helpers.entity import Entity
+from homeassistant.helpers import extract_domain_configs
+from homeassistant.helpers.entity import Entity, generate_entity_id
 from homeassistant.util.location import distance
+from homeassistant.util import convert
 
 DOMAIN = "zone"
 ENTITY_ID_FORMAT = 'zone.{}'
@@ -24,11 +23,14 @@ DEFAULT_NAME = 'Unnamed zone'
 ATTR_RADIUS = 'radius'
 DEFAULT_RADIUS = 100
 
+ATTR_PASSIVE = 'passive'
+DEFAULT_PASSIVE = False
+
 ICON_HOME = 'mdi:home'
 
 
 def active_zone(hass, latitude, longitude, radius=0):
-    """ Find the active zone for given latitude, longitude. """
+    """Find the active zone for given latitude, longitude."""
     # Sort entity IDs so that we are deterministic if equal distance to 2 zones
     zones = (hass.states.get(entity_id) for entity_id
              in sorted(hass.states.entity_ids(DOMAIN)))
@@ -37,6 +39,9 @@ def active_zone(hass, latitude, longitude, radius=0):
     closest = None
 
     for zone in zones:
+        if zone.attributes.get(ATTR_PASSIVE):
+            continue
+
         zone_dist = distance(
             latitude, longitude,
             zone.attributes[ATTR_LATITUDE], zone.attributes[ATTR_LONGITUDE])
@@ -55,7 +60,7 @@ def active_zone(hass, latitude, longitude, radius=0):
 
 
 def in_zone(zone, latitude, longitude, radius=0):
-    """ Test if given latitude, longitude is in given zone. """
+    """Test if given latitude, longitude is in given zone."""
     zone_dist = distance(
         latitude, longitude,
         zone.attributes[ATTR_LATITUDE], zone.attributes[ATTR_LONGITUDE])
@@ -64,7 +69,7 @@ def in_zone(zone, latitude, longitude, radius=0):
 
 
 def setup(hass, config):
-    """ Setup zone. """
+    """Setup zone."""
     entities = set()
 
     for key in extract_domain_configs(config, DOMAIN):
@@ -74,17 +79,18 @@ def setup(hass, config):
 
         for entry in entries:
             name = entry.get(CONF_NAME, DEFAULT_NAME)
-            latitude = entry.get(ATTR_LATITUDE)
-            longitude = entry.get(ATTR_LONGITUDE)
-            radius = entry.get(ATTR_RADIUS, DEFAULT_RADIUS)
+            latitude = convert(entry.get(ATTR_LATITUDE), float)
+            longitude = convert(entry.get(ATTR_LONGITUDE), float)
+            radius = convert(entry.get(ATTR_RADIUS, DEFAULT_RADIUS), float)
             icon = entry.get(ATTR_ICON)
+            passive = entry.get(ATTR_PASSIVE, DEFAULT_PASSIVE)
 
             if None in (latitude, longitude):
                 logging.getLogger(__name__).error(
                     'Each zone needs a latitude and longitude.')
                 continue
 
-            zone = Zone(hass, name, latitude, longitude, radius, icon)
+            zone = Zone(hass, name, latitude, longitude, radius, icon, passive)
             zone.entity_id = generate_entity_id(ENTITY_ID_FORMAT, name,
                                                 entities)
             zone.update_ha_state()
@@ -92,7 +98,7 @@ def setup(hass, config):
 
     if ENTITY_ID_HOME not in entities:
         zone = Zone(hass, hass.config.location_name, hass.config.latitude,
-                    hass.config.longitude, DEFAULT_RADIUS, ICON_HOME)
+                    hass.config.longitude, DEFAULT_RADIUS, ICON_HOME, False)
         zone.entity_id = ENTITY_ID_HOME
         zone.update_ha_state()
 
@@ -100,37 +106,43 @@ def setup(hass, config):
 
 
 class Zone(Entity):
-    """ Represents a Zone in Home Assistant. """
-    # pylint: disable=too-many-arguments
-    def __init__(self, hass, name, latitude, longitude, radius, icon):
+    """Representation of a Zone."""
+
+    # pylint: disable=too-many-arguments, too-many-instance-attributes
+    def __init__(self, hass, name, latitude, longitude, radius, icon, passive):
+        """Initialize the zone."""
         self.hass = hass
         self._name = name
-        self.latitude = latitude
-        self.longitude = longitude
-        self.radius = radius
+        self._latitude = latitude
+        self._longitude = longitude
+        self._radius = radius
         self._icon = icon
-
-    def should_poll(self):
-        return False
+        self._passive = passive
 
     @property
     def name(self):
+        """Return the name of the zone."""
         return self._name
 
     @property
     def state(self):
-        """ The state property really does nothing for a zone. """
+        """Return the state property really does nothing for a zone."""
         return STATE
 
     @property
     def icon(self):
+        """Return the icon if any."""
         return self._icon
 
     @property
     def state_attributes(self):
-        return {
+        """Return the state attributes of the zone."""
+        data = {
             ATTR_HIDDEN: True,
-            ATTR_LATITUDE: self.latitude,
-            ATTR_LONGITUDE: self.longitude,
-            ATTR_RADIUS: self.radius,
+            ATTR_LATITUDE: self._latitude,
+            ATTR_LONGITUDE: self._longitude,
+            ATTR_RADIUS: self._radius,
         }
+        if self._passive:
+            data[ATTR_PASSIVE] = self._passive
+        return data

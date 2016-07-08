@@ -1,7 +1,5 @@
 """
-homeassistant.components.sensor.bitcoin
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Bitcoin information service that uses blockchain.info and its online wallet.
+Bitcoin information service that uses blockchain.info.
 
 For more details about this platform, please refer to the documentation at
 https://home-assistant.io/components/sensor.bitcoin/
@@ -9,76 +7,52 @@ https://home-assistant.io/components/sensor.bitcoin/
 import logging
 from datetime import timedelta
 
-from homeassistant.util import Throttle
 from homeassistant.helpers.entity import Entity
+from homeassistant.util import Throttle
 
-
-REQUIREMENTS = ['blockchain==1.1.2']
+REQUIREMENTS = ['blockchain==1.3.3']
 _LOGGER = logging.getLogger(__name__)
 OPTION_TYPES = {
-    'wallet': ['Wallet balance', 'BTC'],
-    'exchangerate': ['Exchange rate (1 BTC)', ''],
+    'exchangerate': ['Exchange rate (1 BTC)', None],
     'trade_volume_btc': ['Trade volume', 'BTC'],
     'miners_revenue_usd': ['Miners revenue', 'USD'],
     'btc_mined': ['Mined', 'BTC'],
     'trade_volume_usd': ['Trade volume', 'USD'],
-    'difficulty': ['Difficulty', ''],
+    'difficulty': ['Difficulty', None],
     'minutes_between_blocks': ['Time between Blocks', 'min'],
-    'number_of_transactions': ['No. of Transactions', ''],
+    'number_of_transactions': ['No. of Transactions', None],
     'hash_rate': ['Hash rate', 'PH/s'],
-    'timestamp': ['Timestamp', ''],
-    'mined_blocks': ['Minded Blocks', ''],
-    'blocks_size': ['Block size', ''],
+    'timestamp': ['Timestamp', None],
+    'mined_blocks': ['Minded Blocks', None],
+    'blocks_size': ['Block size', None],
     'total_fees_btc': ['Total fees', 'BTC'],
     'total_btc_sent': ['Total sent', 'BTC'],
     'estimated_btc_sent': ['Estimated sent', 'BTC'],
     'total_btc': ['Total', 'BTC'],
-    'total_blocks': ['Total Blocks', ''],
-    'next_retarget': ['Next retarget', ''],
+    'total_blocks': ['Total Blocks', None],
+    'next_retarget': ['Next retarget', None],
     'estimated_transaction_volume_usd': ['Est. Transaction volume', 'USD'],
     'miners_revenue_btc': ['Miners revenue', 'BTC'],
     'market_price_usd': ['Market price', 'USD']
 }
+ICON = 'mdi:currency-btc'
 
-# Return cached results if last scan was less then this time ago
+# Return cached results if last scan was less then this time ago.
 MIN_TIME_BETWEEN_UPDATES = timedelta(seconds=120)
 
 
 def setup_platform(hass, config, add_devices, discovery_info=None):
-    """ Get the Bitcoin sensor. """
+    """Setup the Bitcoin sensors."""
+    from blockchain import exchangerates
 
-    try:
-        from blockchain.wallet import Wallet
-        from blockchain import exchangerates, exceptions
-
-    except ImportError:
-        _LOGGER.exception(
-            "Unable to import blockchain. "
-            "Did you maybe not install the 'blockchain' package?")
-
-        return False
-
-    wallet_id = config.get('wallet', None)
-    password = config.get('password', None)
     currency = config.get('currency', 'USD')
 
     if currency not in exchangerates.get_ticker():
-        _LOGGER.error('Currency "%s" is not available. Using "USD".', currency)
+        _LOGGER.error('Currency "%s" is not available. Using "USD"', currency)
         currency = 'USD'
-
-    wallet = Wallet(wallet_id, password)
-
-    try:
-        wallet.get_balance()
-    except exceptions.APIException as error:
-        _LOGGER.error(error)
-        wallet = None
 
     data = BitcoinData()
     dev = []
-    if wallet is not None and password is not None:
-        dev.append(BitcoinSensor(data, 'wallet', currency, wallet))
-
     for variable in config['display_options']:
         if variable not in OPTION_TYPES:
             _LOGGER.error('Option type: "%s" does not exist', variable)
@@ -90,45 +64,47 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
 
 # pylint: disable=too-few-public-methods
 class BitcoinSensor(Entity):
-    """ Implements a Bitcoin sensor. """
+    """Representation of a Bitcoin sensor."""
 
-    def __init__(self, data, option_type, currency, wallet=''):
+    def __init__(self, data, option_type, currency):
+        """Initialize the sensor."""
         self.data = data
         self._name = OPTION_TYPES[option_type][0]
         self._unit_of_measurement = OPTION_TYPES[option_type][1]
         self._currency = currency
-        self._wallet = wallet
         self.type = option_type
         self._state = None
         self.update()
 
     @property
     def name(self):
-        """ Returns the name of the device. """
+        """Return the name of the sensor."""
         return self._name
 
     @property
     def state(self):
-        """ Returns the state of the device. """
+        """Return the state of the sensor."""
         return self._state
 
     @property
     def unit_of_measurement(self):
+        """Return the unit the value is expressed in."""
         return self._unit_of_measurement
+
+    @property
+    def icon(self):
+        """Return the icon to use in the frontend, if any."""
+        return ICON
 
     # pylint: disable=too-many-branches
     def update(self):
-        """ Gets the latest data and updates the states. """
-
+        """Get the latest data and updates the states."""
         self.data.update()
         stats = self.data.stats
         ticker = self.data.ticker
 
         # pylint: disable=no-member
-        if self.type == 'wallet' and self._wallet is not None:
-            self._state = '{0:.8f}'.format(self._wallet.get_balance() *
-                                           0.00000001)
-        elif self.type == 'exchangerate':
+        if self.type == 'exchangerate':
             self._state = ticker[self._currency].p15min
             self._unit_of_measurement = self._currency
         elif self.type == 'trade_volume_btc':
@@ -177,16 +153,16 @@ class BitcoinSensor(Entity):
 
 
 class BitcoinData(object):
-    """ Gets the latest data and updates the states. """
+    """Get the latest data and update the states."""
 
     def __init__(self):
+        """Initialize the data object."""
         self.stats = None
         self.ticker = None
 
     @Throttle(MIN_TIME_BETWEEN_UPDATES)
     def update(self):
-        """ Gets the latest data from blockchain.info. """
-
+        """Get the latest data from blockchain.info."""
         from blockchain import statistics, exchangerates
 
         self.stats = statistics.get()
